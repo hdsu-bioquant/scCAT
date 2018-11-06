@@ -1,0 +1,170 @@
+---
+title: "scCAT-seq chromatin accessibility and transcriptome integration, Regulatory Relationships"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    mathjax: null
+params:
+  assayID:  "foo"
+  work_dir: ""
+  omicsID:  "rna_atac"
+  matrix_rna: "path/to/matrix_rna"
+  activeaccess: "path/to/matrix_rna"
+  diffexpr: "path/to/output.test"
+  regrel: "path/to/output.regulatoryrelationships"
+  testID: "testID"
+  test.pt: 0.05
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+library(kableExtra)
+library(viridis)
+library(parallel)
+
+MC_CORES <- 10L
+```
+
+# `r params$assayID`
+
+## Data loading
+  
+Read normalized RNAseq data, and matrix of Active Accessible peaks
+
+```{r dataloading, results="asis", cache=FALSE, message=FALSE, warning=FALSE}
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Read normalized Expression matrices                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+rna.exprs  <- readRDS(params$matrix_rna)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Load Active Accessible peaks                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+cells.reg.mat <- readRDS(params$activeaccess)
+
+print("Dim of Active Accessible peaks matrix ")
+dim(cells.reg.mat)
+
+```
+
+
+## Test Differential expression
+
+```{r diffexprstest, cache=FALSE, eval=TRUE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                  test regulatory effect in gene expression                 ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+reg.mat <- cells.reg.mat
+regID.df <- data.frame(
+  regID  = rownames(reg.mat), 
+  isreg  = rowSums(reg.mat),
+  noreg  = ncol(reg.mat) - rowSums(reg.mat),
+  row.names = rownames(reg.mat),
+  stringsAsFactors = FALSE)
+
+# filter prediction with small group to compare, drop if regulatory is not in 10% of the cells
+regID.df <- regID.df[(regID.df$isreg/ncol(reg.mat) >= 0.1 & regID.df$noreg/ncol(reg.mat) >= 0.1), ,drop=FALSE]
+reg.mat <- reg.mat[rownames(reg.mat) %in% regID.df$regID , , drop=FALSE]
+
+print("Dim of Active Accessible Peaks matrix after filtering regulatory interactions found in a low number of cells ")
+dim(reg.mat)
+
+# Split Active Accessible Peaks matrix in list for each gene
+reg.mat <- as.data.frame(reg.mat)
+geneIDs.factor <- as.factor(sapply(strsplit(rownames(reg.mat), "\\|"), "[[", 1))
+
+print("Split Active Accessible Peaks matrix in list for each gene")
+exprs.split.list <- split(reg.mat, geneIDs.factor)
+print("Split Active Accessible Peaks matrix in list for each gene - done!")
+
+# Build list to multi core lapply
+exprs.split.list <- mclapply(exprs.split.list, function(reg.mat.gene){
+  geneID <- sapply(strsplit(rownames(reg.mat.gene), "\\|"), "[[", 1)[1]
+  gene.exprs <- as.numeric(rna.exprs[geneID,] )
+  
+  # Split expression in group with regulatory relationship and group whitout it
+  apply(reg.mat.gene, 1, function(reg.gene.peak){
+    split(gene.exprs, as.factor(reg.gene.peak))
+  })
+}, mc.cores=MC_CORES)
+gc()
+
+exprs.split.list <- unlist(exprs.split.list, recursive = FALSE)
+
+
+print("Start diff expression test")
+# test differential expression based on presence and absence of regulatory relationships
+regID.list <- mclapply(exprs.split.list, function(gene.exprs.split){
+  # Wilcoxon test
+  res.wil <- wilcox.test(gene.exprs.split[[1]], gene.exprs.split[[2]])$p.value
+  # T test
+  res.t <- t.test(gene.exprs.split[[1]], gene.exprs.split[[2]])$p.value
+  
+  res <- data.frame(pval.t.test      = res.t,
+                    pval.wilcox.test = res.wil,
+                    isreg = length(gene.exprs.split$`TRUE`),
+                    noreg = length(gene.exprs.split$`FALSE`),
+                    #regID = regID,
+                    stringsAsFactors = FALSE)
+  
+  return(res)
+}, mc.cores=MC_CORES)
+# Bind resutls in a dataframe
+reg.diff.df <- as.data.frame(do.call(rbind, regID.list))
+reg.diff.df$regID <- sapply(strsplit(rownames(reg.diff.df), "\\."), "[[", 2)
+
+
+```
+
+## Regulatory relationships
+
+Filter active accessible peaks that are not related to a change in expression
+
+```{r diffexprsfilter, cache=FALSE, eval=TRUE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Filter only diff expr                             ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+head(reg.diff.df)
+
+testIDs <- setNames(c("pval.t.test", "pval.wilcox.test"), c("t.test", "wilcox.test"))
+testID <- testIDs[params$testID]
+
+test.res <- reg.diff.df
+saveRDS(test.res, file = params$diffexpr)
+
+# filter prediction with small group to compare, drop if regulatory is not in 10% of the cells
+test.res$isreg <- test.res$isreg/(test.res$isreg + test.res$noreg)
+test.res$noreg <- test.res$noreg/(test.res$isreg + test.res$noreg)
+test.res <- test.res[(test.res$isreg >= 0.1 & test.res$noreg >= 0.1), ,drop=FALSE]
+print(dim(test.res))
+  
+# Filter prediction without effect in the expression of the gene
+test.res <- test.res[!is.na(test.res[,testID]), , drop=FALSE]
+test.res <- test.res[test.res[,testID] < params$test.pt, , drop=FALSE]
+
+reg.mat <- cells.reg.mat
+print("Dim of unfiltered Active Accessible Peaks matrix")
+print(dim(reg.mat))
+reg.mat <- reg.mat[rownames(reg.mat) %in% test.res$regID, ,drop=FALSE]
+print("Dim of Regulatory Relationships matrix")
+print(dim(reg.mat))
+  
+# save regulatory relationships results
+saveRDS(reg.mat, file = params$regrel)
+
+```
+
+

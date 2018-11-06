@@ -1,0 +1,388 @@
+---
+title: "scCAT-seq Non-Negative Matrix Factorization Transcriptome (RNAseq)"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: false
+params:
+  assayID:  "foo"
+  work_dir: ""
+  nmf_kmin: ""
+  nmf_kmax: ""
+  nmf_iter: ""
+  matrix: "path/to/matrix"
+  metadata: "path/to/metadata"
+  cyclone: "path/to/cyclone"
+  norm_nmf:  "path/to/output/normnmf"
+  omicsID: "rna"
+---
+
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(Bratwurst)
+library(viridis)
+library(ComplexHeatmap)
+library(circlize)
+library(ggplot2)
+library(knitr)
+
+
+
+```
+
+# `r params$assayID`
+
+## Data loading
+  
+Read normalized gene expression matrix
+  
+```{r dataloading, results="asis", cache=FALSE, message=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                         Read normalized data                               ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# read normalized matrix
+norm.mat <- readRDS(params$matrix)
+
+# read metadata
+metadata <- readRDS(params$metadata)
+
+# read cell cycle assignments
+cyclone <- readRDS(params$cyclone)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Print dataset dimension                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+tmp.dim <- data.frame(dim(norm.mat))
+colnames(tmp.dim) <- "Value"
+
+cat("Dimension of transcriptome dataset (RNAseq)  \n  ") 
+kable(tmp.dim) 
+
+```
+  
+
+# Applying NMF
+
+Applying Non-Negative Matrix Factorization (NMF) to normalized transcriptome data (RNAseq) 
+  
+  
+```{r NMF_param, echo=TRUE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##              Parameters to run NMF in GPUs using  pythonCuda               ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+k.min <- params$nmf_kmin
+k.max <- params$nmf_kmax
+outer.iter <- params$nmf_iter
+inner.iter <- 2*10^4
+
+# path to save NMF results
+path.NMF.run <- paste0(params$assayID, "/", params$omicsID, "/NMF/", params$assayID, "_NMF_", params$omicsID, ".RDS")
+```
+
+
+```{r NMF_pyCuda, eval=TRUE, message=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Create nmf experiment object                        ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+nmf.exp <- nmfExperimentFromMatrix(matrix = norm.mat)
+
+if (file.exists(path.NMF.run)) {
+  # If NMF results are available, just read results and render report
+  nmf.exp <- readRDS(path.NMF.run)
+  #norm.nmf.exp <- readRDS(params$norm_nmf)
+} else {
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                                   Run NMF                                ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  nmf.exp <- runNmfGpuPyCuda(
+    nmf.exp = nmf.exp,
+    k.min = k.min,
+    k.max = k.max,
+    outer.iter = outer.iter,
+    inner.iter = inner.iter,
+    tmp.path = paste0(params$work_dir, "/tmp"),
+    seed = TRUE,
+    gpu.id = 0)
+  
+  # save results
+  saveRDS(nmf.exp, file = params$nmf)
+}
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                               Normalize NMF                                ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# normalize NMF
+norm.nmf.exp <- normalizeW(nmf.exp)
+norm.nmf.exp.H <- normalizeH(nmf.exp)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      K stats and normalization                             ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+## Estimate K stats
+my.kstats <- function(NMFexperiment){
+  # calc different k stats
+  NMFexperiment <- computeFrobErrorStats(NMFexperiment)
+  NMFexperiment <- computeSilhoutteWidth(NMFexperiment)
+  NMFexperiment <- computeCopheneticCoeff(NMFexperiment)
+  NMFexperiment <- computeAmariDistances(NMFexperiment)
+  return(NMFexperiment)
+}
+norm.nmf.exp <- my.kstats(norm.nmf.exp)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                              Save results                                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+#save results as RDS file
+saveRDS(norm.nmf.exp, file = params$norm_nmf)
+
+```
+ 
+ 
+### Factorization quality metrics and optimal K
+
+Based on the results of the factorization quality metrics, an optimal number of signatures (k) must be chosen:
+  
+```{r NMF_optK, results='hide',fig.keep='all', eval=TRUE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                            Plot K stats                                    ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+my.plotKstats <- function(NMFexperiment, title){
+  # visualize k stats
+  gg.optKr <- plotKStats(NMFexperiment)
+  gg.optKr <- gg.optKr + theme_bw() + 
+    ggtitle(title) +
+    theme(plot.title=element_text(hjust=0.5))
+  return(gg.optKr)
+}
+
+gg.optKr <- my.plotKstats(norm.nmf.exp, "NMF factorization quality metrics")
+gg.optKr
+
+# Path to save results
+path_results <- file.path(params$work_dir, params$assayID, params$omicsID)
+figs.path <- file.path(params$work_dir, params$assayID, "figs/NMF")
+
+#create directory to save plots
+dir.create(figs.path, recursive = TRUE)
+
+#save K stats
+pdf(file = paste0(figs.path, "/", params$omicsID, "_NMF_factorization.metrics.pdf"), width=8, height=6)
+gg.optKr
+dev.off()
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Generate river plot                                 ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+river <- generateRiverplot(norm.nmf.exp)
+plot(river, plot_area=1, yscale=0.6, nodewidth=0.5)
+
+pdf(file = paste0(figs.path, "/", params$omicsID, "_NMF_riverplot.pdf"), width=8, height=6)
+plot(river, plot_area=1, yscale=0.6, nodewidth=0.5)
+dev.off()
+
+
+
+```
+
+Minize the Frobenius error, the coefficient of variation and the mean Amari distance, while maximizing the sum and mean silhouette width and the cophenic coefficient.
+  
+### H Matrix, W normalized:  {.tabset}  
+  
+  
+```{r Hmatrix_Wnorm, fig.width=10, fig.height=5.5, out.width="90%", results='asis', eval=TRUE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        H matrix heatmap annotation                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+
+#Annotation for H matrix heatmap
+celltypeIDs <- unique(metadata$celltype)
+type.colVector <- list(Type       = structure(inferno(n=length(celltypeIDs)), names=celltypeIDs),
+                       G1_score   = colorRamp2(seq(0, 1, length.out = 100), plasma(n=100, end =.8)),
+                       G2M_score  = colorRamp2(seq(0, 1, length.out = 100), plasma(n=100, end =.8)))
+heat.anno <- HeatmapAnnotation(df = data.frame(Type      = metadata$celltype,
+                                               G1_score  = cyclone$scores$G1,
+                                               G2M_score = cyclone$scores$G2M),
+                               col = type.colVector,
+                               show_annotation_name = TRUE, na_col = "white",
+                               annotation_legend_param=list(
+                                 G1_score=list(color_bar="continuous"),
+                                 G2M_score=list(color_bar="continuous")))
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##              Generate H matrix heatmap, W normalized                       ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+h.heatmap.list <- list()
+for(ki in names(norm.nmf.exp@HMatrixList)) {
+  cat("\n")
+  cat("  \n#### H matrix for k=",  ki, "  \n  ")
+  #plot H matrix
+  tmp.hmatrix <- HMatrix(norm.nmf.exp, k = ki)
+  colnames(tmp.hmatrix) <- colnames(norm.nmf.exp)
+  h.heatmap <- Heatmap(tmp.hmatrix,
+                       col = viridis(n=100),
+                       name = "Exposure",
+                       clustering_distance_columns = 'pearson',
+                       show_column_dend = FALSE,
+                       heatmap_legend_param = 
+                         list(color_bar = "continuous", legend_height=unit(2, "cm")),
+                       top_annotation = heat.anno,
+                       show_column_names = FALSE,
+                       show_row_names = FALSE,
+                       cluster_rows = FALSE)
+  print(h.heatmap)
+  h.heatmap.list[[as.character(ki)]] <- h.heatmap
+}
+
+#save H matrix heatmap
+pdf(file = paste0(figs.path, "/", params$omicsID, "_NMF_Hmatrix_wnorm_heatmap.pdf"), width=10, height=7)
+for(ki in names(h.heatmap.list)) {
+  print(h.heatmap.list[[as.character(ki)]])
+}
+dev.off()
+
+
+```
+
+
+### H Matrix, H normalized:  {.tabset}  
+  
+  
+```{r Hmatrix_Hnorm, fig.width=10, fig.height=5.5, out.width="90%", results='asis', eval=TRUE, warning=FALSE}
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##              Generate H matrix heatmap, H normalized                       ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+h.heatmap.list <- list()
+for(ki in names(norm.nmf.exp.H@HMatrixList)) {
+  cat("\n")
+  cat("  \n#### H matrix for k=",  ki, "  \n  ")
+  #plot H matrix
+  tmp.hmatrix <- HMatrix(norm.nmf.exp.H, k = ki)
+  colnames(tmp.hmatrix) <- colnames(norm.nmf.exp.H)
+  h.heatmap <- Heatmap(tmp.hmatrix,
+                       col = viridis(n=100),
+                       name = "Exposure",
+                       clustering_distance_columns = 'pearson',
+                       show_column_dend = FALSE,
+                       heatmap_legend_param = 
+                         list(color_bar = "continuous", legend_height=unit(2, "cm")),
+                       top_annotation = heat.anno,
+                       show_column_names = FALSE,
+                       show_row_names = FALSE,
+                       cluster_rows = FALSE)
+  print(h.heatmap)
+  h.heatmap.list[[as.character(ki)]] <- h.heatmap
+}
+
+#save H matrix heatmap
+pdf(file = paste0(figs.path, "/", params$omicsID, "_NMF_Hmatrix_hnorm_heatmap.pdf"), width=10, height=7)
+for(ki in names(h.heatmap.list)) {
+  print(h.heatmap.list[[as.character(ki)]])
+}
+dev.off()
+
+```
+
+
+```{r saveNMFobjects, eval=TRUE, warning=FALSE}
+path_results_NMF <- file.path(path_results, "NMF/Wnormalized")
+
+for(K in k.min:k.max) {
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##               Select opt K and compute feature stats                     ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  path_results_K <- paste0(path_results_NMF, "/K", K)
+  dir.create(path_results_K, recursive = TRUE)
+  
+  norm.nmf.exp <- setOptK(norm.nmf.exp, K)
+  norm.nmf.exp@OptK
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                             NMH H Matrix                                 ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  norm.nmf.hmatrix <- HMatrix(norm.nmf.exp, k = K)
+  colnames(norm.nmf.hmatrix) <- colnames(norm.nmf.exp)
+  rownames(norm.nmf.hmatrix) <- paste0("Signature", 1:K)
+  saveRDS(norm.nmf.hmatrix, paste0(path_results_K, "/NMF_hmatrix.K", K, ".RDS"))
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                             NMH W Matrix                                 ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  norm.nmf.wmatrix <- WMatrix(norm.nmf.exp, k = K)
+  colnames(norm.nmf.wmatrix) <- paste0("Signature", 1:K)
+  rownames(norm.nmf.wmatrix) <- rownames(norm.nmf.exp)
+  saveRDS(norm.nmf.wmatrix, paste0(path_results_K, "/NMF_wmatrix.K", K, ".RDS"))
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                          NMH W Matrix Z scores                           ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  norm.nmf.wmatrix.zscores <- apply(norm.nmf.wmatrix, MARGIN=2, function(wmat_score){
+    (wmat_score - median(wmat_score)) / mad(wmat_score)
+  })
+  colnames(norm.nmf.wmatrix.zscores) <- paste0("Zscore_", colnames(norm.nmf.wmatrix.zscores))
+  saveRDS(norm.nmf.wmatrix.zscores, paste0(path_results_K, "/NMF_wmatrix-Zscore.K", K, ".RDS"))
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                      NMF Signature features                              ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  if (K > 2) {
+    norm.nmf.exp <- computeFeatureStats(norm.nmf.exp)
+    norm.nmf.exp <- computeSignatureSpecificFeatures(norm.nmf.exp, 1)
+    SignaFeat <- do.call(cbind, lapply(1:norm.nmf.exp@OptK, function(i){
+      as.numeric(substr(norm.nmf.exp@FeatureStats$cluster, i, i))
+    }))
+    SignaFeat <- as.data.frame(SignaFeat)
+    #rownames are features names
+    rownames(SignaFeat) <- rownames(norm.nmf.exp)
+    #conames are signatures
+    colnames(SignaFeat) <- paste0("Signature", 1:norm.nmf.exp@OptK)
+    saveRDS(SignaFeat, paste0(path_results_K, "/NMF_Features.K", K, ".RDS"))
+  }
+}
+
+
+
+```
+
+
+```{r saveNMFobjectsHnorm, eval=TRUE}
+path_results_NMF <- file.path(path_results, "NMF/Hnormalized")
+
+for(K in k.min:k.max) {
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##               Select opt K and compute feature stats                     ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  path_results_K <- paste0(path_results_NMF, "/K", K)
+  dir.create(path_results_K, recursive = TRUE)
+  
+  norm.nmf.exp.H <- setOptK(norm.nmf.exp.H, K)
+  norm.nmf.exp.H@OptK
+  sig.names <- paste0("Signature", 1:K)
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                             NMH H Matrix                                 ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  norm.nmf.hmatrix <- HMatrix(norm.nmf.exp.H, k = K)
+  colnames(norm.nmf.hmatrix) <- colnames(norm.nmf.exp.H)
+  rownames(norm.nmf.hmatrix) <- sig.names
+  saveRDS(norm.nmf.hmatrix, paste0(path_results_K, "/NMF_hmatrix.K", K, ".RDS"))
+}
+
+```
+
+
+

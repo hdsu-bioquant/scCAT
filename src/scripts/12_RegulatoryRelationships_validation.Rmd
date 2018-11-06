@@ -1,0 +1,489 @@
+---
+title: "scCAT-seq chromatin accessibility and transcriptome integration, Regulatory Relationships Validation"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    mathjax: null
+params:
+  assayID:  "foo"
+  work_dir: ""
+  omicsID:  "rna_atac"
+  window:   50000
+  wcorr_test: "Spearman"
+  wcorr_p2p:   "path/to/input"
+  wcorr_g2p:   "path/to/input"
+  matrix_atac: "path/to/input"
+  granges:     "path/to/input"
+  regrel:      "path/to/input"
+  peak2gene: "path/to/annotation"
+  ChIA_PET:  "path/to/db"
+  chiapet_val: "path/to/output"
+  
+
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+#library(viridis)
+library(parallel)
+library(GenomicRanges)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(InteractionSet)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                               Window Size                                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+up_down <- params$window
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Promoter Window Size                              ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+promoter.window <- 1000
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                       Select Correlation method                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+corr.method <- params$wcorr_test
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                       ggplot global theme                                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+tgg <- theme_bw() +
+  theme(axis.line=element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+
+
+```
+
+# `r params$assayID`
+
+# Data loading
+  
+Read peak to gene annotation and weighted correlation results
+
+  
+```{r dataloading, cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                           Peak to gene annotation                          ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+peak2gene <- readRDS(params$peak2gene)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Read normalized Expression matrices                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+#rna.exprs   <- readRDS(params$matrix_rna)
+atac.exprs  <- readRDS(params$matrix_atac)
+
+# Use same ID
+#colnames(atac.exprs)  <- colnames(rna.exprs)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Read ATACseq Peaks as GRanges                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.peaks.granges <- readRDS(params$granges)
+atac.peaks.granges <- atac.peaks.granges[rownames(atac.exprs)]
+
+length(atac.peaks.granges)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Granges of human genes                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+library(EnsDb.Hsapiens.v75)
+edb <- EnsDb.Hsapiens.v75
+organism(edb)
+# supportedFilters(edb)
+## Change the seqlevels style form Ensembl (default) to UCSC:
+seqlevelsStyle(edb) <- "UCSC"
+
+hsapiens.genes <- genes(edb)
+
+```
+
+# ChIA-PET Validation
+
+```{r ChIAPET_bedpe, cache=FALSE, message=FALSE, warning=FALSE}
+library(InteractionSet)
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                              Read ChIA-PET data                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+#ChIA_PET <- readRDS("db/3DValidation/ChIA-PET.Hela.HCT.K562.bedpe.RDS")
+ChIA_PET <- readRDS(params$ChIA_PET)
+
+ChIA_PET.A <- ChIA_PET[,c("InteractorAChr", "InteractorAStart", "InteractorAEnd")]
+ChIA_PET.B <- ChIA_PET[,c("InteractorBChr", "InteractorBStart", "InteractorBEnd")]
+
+colnames(ChIA_PET.A) <- c("chr", "start", "end")
+colnames(ChIA_PET.B) <- c("chr", "start", "end")
+
+# make Granges
+ChIA_PET.A <- makeGRangesFromDataFrame(ChIA_PET.A, keep.extra.columns = TRUE)
+ChIA_PET.B <- makeGRangesFromDataFrame(ChIA_PET.B, keep.extra.columns = TRUE)
+
+summary(distance(ChIA_PET.A, ChIA_PET.B))
+hist(distance(ChIA_PET.A, ChIA_PET.B))
+
+ChIA_PET.bedpe <- GInteractions(ChIA_PET.A, ChIA_PET.B)
+
+rm(ChIA_PET, ChIA_PET.A, ChIA_PET.B)
+gc()
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                  Annotate Chromosome location of each gene                 ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+peak2gene$interactionID <- paste0(peak2gene$geneID, "|", peak2gene$peakID)
+peak2gene$chr <- as.character(hsapiens.genes[match(peak2gene$geneID, hsapiens.genes$gene_id)]@seqnames)
+head(peak2gene)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Match to ChIA-PET regions                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Match genes and peaks to ChIA-PET regions
+scCAT.links <- linkOverlaps(ChIA_PET.bedpe, hsapiens.genes, atac.peaks.granges)
+scCAT.links$geneID <- names(hsapiens.genes[scCAT.links$subject1])
+scCAT.links$peakID <- names(atac.peaks.granges[scCAT.links$subject2])
+scCAT.links$linkID <- paste0(scCAT.links$geneID, "|", scCAT.links$peakID)
+
+# Match ChIA-PET interaction to all possible interactions
+peak2gene$ChIA_PET <- FALSE
+peak2gene$ChIA_PET[na.omit(match(scCAT.links$linkID, peak2gene$interactionID))] <- TRUE
+
+sum(peak2gene$ChIA_PET)
+
+
+```
+
+
+
+```{r processWCorr_ATAC, cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##  Regulatory interactions based on weighted correlation of ATACseq data     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Read Weighted correlation
+atac.p2d.wcorr <- readRDS(params$wcorr_p2p)
+
+reg.interactions.scATAC <- do.call(rbind, lapply(setNames(names(atac.p2d.wcorr), names(atac.p2d.wcorr)), function(geneID){
+  promoter2distal <- atac.p2d.wcorr[[geneID]]
+  fil <- rowSums(abs(promoter2distal) > 0.2) > 0
+  promoter2distal <- promoter2distal[fil, , drop=FALSE]
+  if (sum(fil) > 0) {
+    rownames(promoter2distal) <- paste0(geneID, "|", rownames(promoter2distal))
+  }
+  promoter2distal
+}))
+rm(atac.p2d.wcorr)
+gc()
+nrow(reg.interactions.scATAC)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Validation with ChIA-PET                          ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+peak2gene$reg.interactions.scATAC <- !is.na(match(peak2gene$interactionID, rownames(reg.interactions.scATAC)))
+peak2gene$reg.interactions.scATAC.chiapet <- peak2gene$reg.interactions.scATAC & peak2gene$ChIA_PET
+
+sum(peak2gene$reg.interactions.scATAC)
+sum(peak2gene$reg.interactions.scATAC.chiapet)
+sum(peak2gene$reg.interactions.scATAC.chiapet)/sum(peak2gene$reg.interactions.scATAC)
+
+```
+
+```{r processWCorr_RNA_ATAC, cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##  Regulatory interactions based on weighted correlation of scCATseq data    ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Read Weighted correlation
+rna_atac.g2d.wcorr <- readRDS(params$wcorr_g2p)
+rna_atac.g2d.wcorr[1:2]
+reg.interactions.scCAT.wcor <- do.call(rbind, lapply(setNames(names(rna_atac.g2d.wcorr), names(rna_atac.g2d.wcorr)), function(geneID){
+  promoter2distal <- rna_atac.g2d.wcorr[[geneID]]
+  fil <- rowSums(abs(promoter2distal) >= 0.3) > 0
+  promoter2distal <- promoter2distal[fil, , drop=FALSE]
+  if (sum(fil) > 0) {
+    rownames(promoter2distal) <- paste0(geneID, "|", rownames(promoter2distal))
+  }
+  promoter2distal
+}))
+rm(rna_atac.g2d.wcorr)
+gc()
+nrow(reg.interactions.scCAT.wcor)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Validation with ChIA-PET                          ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+peak2gene$reg.interactions.scCAT.wcor <- !is.na(match(peak2gene$interactionID, rownames(reg.interactions.scCAT.wcor)))
+peak2gene$reg.interactions.scCAT.wcor <- peak2gene$reg.interactions.scCAT.wcor & !peak2gene$Promoter
+peak2gene$reg.interactions.scCAT.wcor.chiapet <- peak2gene$reg.interactions.scCAT.wcor & peak2gene$ChIA_PET
+
+sum(peak2gene$reg.interactions.scCAT.wcor)
+sum(peak2gene$reg.interactions.scCAT.wcor.chiapet)
+sum(peak2gene$reg.interactions.scCAT.wcor.chiapet)/sum(peak2gene$reg.interactions.scCAT.wcor)
+
+```
+
+
+
+
+
+
+
+# Regulatory Relationships Variability ChIA-PET validation  
+
+```{r countreg, eval=TRUE, results='asis', message=FALSE}
+library(eulerr)
+library(gridExtra)
+library(DT)
+library(UpSetR)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                     Read regulatory relationships                          ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+cells.reg.mat <- readRDS(params$regrel)
+print(dim(cells.reg.mat))
+
+reg.methodID <- "reg.interactions.scCAT"
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Split peals By first field                        ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Cell type of each peak
+peak2gene$peakID_cellType <- sapply(strsplit(peak2gene$peakID, "_"), "[[", 1)
+# Split into cell lines
+peak2gene.celltype <- split(peak2gene, factor(peak2gene$peakID_cellType))
+lapply(peak2gene.celltype, dim)
+
+assign_regulatory_relationships <- function(peak2gene.onetype){
+  peak2gene.onetype[,reg.methodID] <- !is.na(match(peak2gene.onetype$interactionID, rownames(cells.reg.mat)))
+  # include only distal peaks
+  peak2gene.onetype[,reg.methodID] <- peak2gene.onetype[,reg.methodID] & !peak2gene.onetype$Promoter
+  peak2gene.onetype[,paste0(reg.methodID, ".chiapet")] <- peak2gene.onetype[,reg.methodID] & peak2gene.onetype$ChIA_PET
+  peak2gene.onetype[,paste0(reg.methodID, ".distal")] <- peak2gene.onetype[,reg.methodID] & !peak2gene.onetype$Promoter
+  peak2gene.onetype
+  
+}
+
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Match tp ChIA-PET validation                        ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Cell specific
+peak2gene.celltype <- lapply(peak2gene.celltype, assign_regulatory_relationships)
+# All cells
+peak2gene <- assign_regulatory_relationships(peak2gene)
+
+
+reg.methodID.diffexp <- reg.methodID
+#Labels to plots
+plot.labels <- setNames(paste0("Strategy", 1:3), c("reg.interactions.scATAC", "reg.interactions.scCAT.wcor", reg.methodID.diffexp))
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                    Figures                                 ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Path to save results
+plotdir <- paste0(params$work_dir, "/", params$assayID, "/figs/regulatoryRelationships_", (params$window/1000),"Kb/ChIA-PET_Validation/")
+dir.create(plotdir, recursive = TRUE)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                    Barplots                                ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+# Mutate dataframe to plot
+gp <- peak2gene %>%
+  #dplyr::select(matches(".*chiapet")) %>%
+  dplyr::select(matches("reg.interactions.*")) %>%
+  summarise_all(sum) %>%
+  gather(key = Prediction_method, value = total_regulatory_interactions, -matches(".*chiapet") ) %>%
+  gather(key = Prediction_method_chiapet, value = regulatory_interactions_chiapet, -Prediction_method, -total_regulatory_interactions ) %>%
+  mutate(Prediction_method_chiapet = gsub(".chiapet", "", Prediction_method_chiapet)) %>%
+  dplyr::filter(Prediction_method_chiapet == Prediction_method) %>%
+  dplyr::select(-Prediction_method_chiapet) %>%
+  mutate(Proportion_in_chiapet = regulatory_interactions_chiapet/total_regulatory_interactions) %>%
+  dplyr::filter(Prediction_method %in% c("reg.interactions.scATAC", "reg.interactions.scCAT.wcor", reg.methodID.diffexp)) %>%
+  mutate(Prediction_method = plot.labels[Prediction_method]) %>%
+  mutate(Prediction_method = factor(Prediction_method, levels = Prediction_method)) %>%
+  #as.data.frame() %>%
+  #print(gp$Prediction_method)
+  ggplot( aes(x = Prediction_method, y = Proportion_in_chiapet, fill = Prediction_method)) + 
+  geom_col() +
+  scale_fill_manual(values = c("#CC4248FF", "#900DA4FF", "#2FB47CFF")) +
+  theme_bw() + 
+  labs(fill = NULL) + 
+  xlab("") + 
+  ylab("Proportion of recovered\nChIA-PET interacting regions") + 
+  ggtitle("Validated Regulatory relationships") + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  tgg +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size=5), 
+        axis.text.y = element_text(size=5),
+        axis.title.y = element_text(size = 6), 
+        legend.position = "bottom", legend.box = "horizontal", 
+        legend.key.width = unit(.7,"line"), legend.key.height = unit(.7,"line"),
+        legend.text = element_text(size=5), title = element_text(size=7)) 
+print(gp)
+ggsave(file.path(plotdir, "regulatoryInteractionsValidation_BarPlot.pdf"), device = "pdf", width = 1.3, height = 2.0)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                    UpsetPlots                              ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+cat("\n")
+cat("  \n#### Intersection of Regulatory Relationships in ChIA-PET    \n  ")
+#c("reg.interactions.scATAC.chiapet", "reg.interactions.scCAT.wcor.chiapet", paste0(reg.methodID, ".chiapet"))
+#peak2gene.upset <- peak2gene[,grep("chiapet", colnames(peak2gene), value = TRUE)]
+peak2gene.upset <- peak2gene[,c("reg.interactions.scATAC.chiapet", "reg.interactions.scCAT.wcor.chiapet", paste0(c(reg.methodID.diffexp), ".chiapet"))]
+colnames(peak2gene.upset) <- plot.labels
+peak2gene.upset <- peak2gene.upset[rowSums(peak2gene.upset) > 0,] * 1
+#head(peak2gene.upset)
+upset(peak2gene.upset, sets =  colnames(peak2gene.upset))
+
+cat("\n")
+cat("  \n#### Intersection of Regulatory Relationships   \n  ")
+peak2gene.upset <- peak2gene[,c("reg.interactions.scATAC", "reg.interactions.scCAT.wcor", reg.methodID.diffexp)]
+colnames(peak2gene.upset) <- plot.labels
+peak2gene.upset <- peak2gene.upset[rowSums(peak2gene.upset) > 0,] * 1
+#head(peak2gene.upset)
+upset(peak2gene.upset, sets =  colnames(peak2gene.upset))
+
+
+pdf(file=file.path(plotdir, "regulatoryInteractionsValidation_upSet.pdf"),
+    width=2.5, height=2.9, pointsize = 5)
+upset(peak2gene.upset, sets =  colnames(peak2gene.upset),
+      sets.bar.color = c("#2FB47CFF", "#CC4248FF", "#900DA4FF" ), set_size.angles = 90)
+dev.off()
+
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                Venn Diagrams                               ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+#head(peak2gene)
+rownames(peak2gene) <- peak2gene$interactionID
+
+# Mutate dataframe in list to plot
+tmp.list <- apply(peak2gene[,c("reg.interactions.scATAC", "reg.interactions.scCAT.wcor", reg.methodID.diffexp)], 2, function(methID){
+  #peak2gene$interactionID[methID]
+  names(methID)[methID]
+})
+
+names(tmp.list) <- plot.labels
+#print(sapply(tmp.list, length))
+col.vector <- setNames(c("#CC4248FF", "#900DA4FF", "#2FB47CFF"), names(tmp.list)) 
+
+# Total areas
+areas.total <- apply(peak2gene[,c("reg.interactions.scATAC", "reg.interactions.scCAT.wcor", reg.methodID.diffexp)], 2, function(methID){
+  unique.method <- rowSums(peak2gene[,c("reg.interactions.scATAC", "reg.interactions.scCAT.wcor", reg.methodID.diffexp)]) == 1
+  sum(unique.method & methID)
+})
+names(areas.total) <- plot.labels
+areas.inter2 <- c(setNames(sum(tmp.list[[1]] %in% tmp.list[[2]]), paste(names(tmp.list[c(1,2)]), collapse = "&")),
+                  setNames(sum(tmp.list[[2]] %in% tmp.list[[3]]), paste(names(tmp.list[c(2,3)]), collapse = "&")),
+                  setNames(sum(tmp.list[[1]] %in% tmp.list[[3]]), paste(names(tmp.list[c(1,3)]), collapse = "&")))
+areas.inter3 <- setNames(sum(tmp.list[[1]][tmp.list[[1]] %in% tmp.list[[2]]] %in% tmp.list[[3]]), paste(names(tmp.list), collapse = "&"))
+areas.inter2 <- areas.inter2 - areas.inter3
+
+print(c(areas.total, areas.inter2, areas.inter3))
+fit.euler <- euler(c(areas.total, areas.inter2, areas.inter3))
+
+
+print(names(tmp.list))
+
+
+pdf(file=file.path(plotdir, "regulatoryInteractionsValidation_vennDiagram.pdf"), width=3.5, height=3.5, pointsize = 6)
+grid.arrange(plot(fit.euler,
+                  lty = 0, # borders Solid=1, Varying=1:6, None=0
+                  fill=c("#CC4248FF", "#900DA4FF", "#2FB47CFF"),
+                  alpha=0.6,
+                  quantities=TRUE))
+dev.off()
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Barplots for each cell line                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+cat("\n")
+cat("  \n## splitting by first field in peaks IDs  {.tabset}   \n   ")
+
+
+for (celltype in names(peak2gene.celltype)) {
+  cat("\n")
+  cat("  \n### ",  celltype, "    \n  ")
+  
+  
+  
+  
+  # Mutate dataframe to plot
+  gp <- peak2gene.celltype[[celltype]] %>%
+    #dplyr::select(matches(".*chiapet")) %>%
+    dplyr::select(matches("reg.interactions.*")) %>%
+    summarise_all(sum) %>%
+    gather(key = Prediction_method, value = total_regulatory_interactions, -matches(".*chiapet") ) %>%
+    gather(key = Prediction_method_chiapet, value = regulatory_interactions_chiapet, -Prediction_method, -total_regulatory_interactions ) %>%
+    mutate(Prediction_method_chiapet = gsub(".chiapet", "", Prediction_method_chiapet)) %>%
+    dplyr::filter(Prediction_method_chiapet == Prediction_method) %>%
+    dplyr::select(-Prediction_method_chiapet) %>%
+    mutate(Proportion_in_chiapet = regulatory_interactions_chiapet/total_regulatory_interactions) %>%
+    dplyr::filter(Prediction_method %in% c("reg.interactions.distance", "reg.interactions.scATAC", "reg.interactions.scCAT.wcor", reg.methodID, reg.methodID.diffexp)) %>%
+    mutate(Prediction_method = plot.labels[Prediction_method]) %>%
+    mutate(Prediction_method = factor(Prediction_method, levels = Prediction_method)) %>%
+    #as.data.frame() %>%
+    #print(gp$Prediction_method)
+    ggplot( aes(x = Prediction_method, y = Proportion_in_chiapet, fill = Prediction_method)) + 
+    geom_col() +
+    theme_bw() + 
+    scale_fill_manual(values = c("#CC4248FF", "#900DA4FF", "#2FB47CFF")) +
+    labs(fill = NULL) + 
+    xlab("") + 
+    ylab("Proportion of recovered\nChIA-PET interacting regions") + 
+    ggtitle("Validated Regulatory relationships") + 
+    theme(plot.title = element_text(hjust = 0.5)) + 
+    tgg +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size=5), 
+          axis.text.y = element_text(size=5),
+          axis.title.y = element_text(size = 6), 
+          legend.position = "bottom", legend.box = "horizontal", 
+          legend.key.width = unit(.7,"line"), legend.key.height = unit(.7,"line"),
+          legend.text = element_text(size=5), title = element_text(size=7)) 
+  print(gp)
+  
+  ggsave(paste0(plotdir, "/", celltype, "_regulatoryInteractionsValidation_BarPlot.pdf"), device = "pdf", width = 1.3, height = 2.0)
+  
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+
+saveRDS(peak2gene, file = params$chiapet_val)
+```
+
+

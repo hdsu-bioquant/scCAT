@@ -1,0 +1,316 @@
+---
+title: "scCAT-seq chromatin accessibility and transcriptome integration, Plot Regulatory Relationships Interactions"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    mathjax: null
+params:
+  assayID:  "foo"
+  work_dir: ""
+  omicsID:  "rna_atac"
+  plot_window: 50000
+  matrix_rna:  "path/to/matrix_rna"
+  matrix_atac: "path/to/matrix_atac"
+  regrel:      "path/to/regulatoryrelationships"
+  metadata:    "path/to/metadata"
+  granges:     "path/to/granges"
+  
+  
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+library(kableExtra)
+library(viridis)
+library(parallel)
+library(GenomicRanges)
+
+MC_CORES <- 48L
+```
+
+# `r params$assayID`
+
+## Data loading
+  
+Read normalized RNAseq and Regulatory Relationships matrices
+
+  
+```{r dataloading, results="asis", cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Read normalized Expression matrices                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+rna.exprs   <- readRDS(params$matrix_rna)
+atac.exprs  <- readRDS(params$matrix_atac)
+
+# Use same ID
+colnames(atac.exprs)  <- colnames(rna.exprs)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Load Active Accessible peaks                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+cells.reg.mat <- readRDS(params$regrel)
+
+print("Dim of Regulatory Relationships matrix ")
+dim(cells.reg.mat)
+
+
+
+
+
+```
+
+
+
+```{r regulatoryDF}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Split in cell types                                 ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+rna.metadata <- readRDS(params$metadata)
+
+cells.clusters <- setNames(factor(rna.metadata$celltype), rna.metadata$sample.rna)
+table(cells.clusters)
+
+
+
+# Summarize by gene, count the number of cells that share a regulatory peak for each gene
+genes.ids <- factor(sapply(strsplit(rownames(cells.reg.mat), "\\|"), "[[", 1))
+
+genes.reg <- mclapply(setNames(levels(genes.ids), levels(genes.ids)), function(gene){
+  # Subset matrix to include only regulatory relationships of the selected gene
+  cells.reg.mat.gene <- cells.reg.mat[genes.ids %in% gene, , drop=FALSE]
+  rownames(cells.reg.mat.gene) <- sapply(strsplit(rownames(cells.reg.mat.gene), "\\|"), "[[", 2)
+  # Summarize by Cell type
+  do.call(cbind, lapply(setNames(levels(cells.clusters), levels(cells.clusters)), function(cluster.id){
+    cellsInCluster <- cells.clusters %in% cluster.id
+    #rowSums(cells.reg.mat.gene[,cellsInCluster])/sum(cellsInCluster)
+    p2g <- round(rowSums(cells.reg.mat.gene[,cellsInCluster, drop=FALSE])/sum(cellsInCluster), digits = 2)
+  }))
+}, mc.cores=MC_CORES)
+
+head(genes.reg)
+
+
+
+```
+
+
+
+```{r granges}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Read ATACseq Peaks as GRanges                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.peaks.granges <- readRDS(params$granges)
+atac.peaks.granges <- atac.peaks.granges[rownames(atac.exprs)]
+
+length(atac.peaks.granges)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Granges of human genes                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+library(EnsDb.Hsapiens.v75)
+edb <- EnsDb.Hsapiens.v75
+organism(edb)
+# supportedFilters(edb)
+## Change the seqlevels style form Ensembl (default) to UCSC:
+seqlevelsStyle(edb) <- "UCSC"
+
+hsapiens.genes <- genes(edb)
+hsapiens.genes <- hsapiens.genes[na.omit(match(sapply(strsplit(rownames(rna.exprs), "\\."), "[[", 1), mcols(hsapiens.genes)$gene_id))]
+
+```
+
+
+
+```{r regnofil, eval=TRUE}
+# Create directory to save plots
+plotdir <- paste0(params$work_dir, "/", params$assayID, "/figs/regulatoryRelationships_", (params$plot_window/1000),"Kb/RegulatoryLinks/")
+dir.create(plotdir, recursive = TRUE)
+
+library(ggbio)
+library(viridis)
+library(parallel)
+
+# basic ggplot theme
+tm <- theme_bw() +
+  theme(#axis.line=element_line(colour = "black"),
+    legend.text = element_text(size=5),
+    axis.line=element_blank(),
+    axis.title.y = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank())
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                 Plot Arches                                ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+#selected <- c("ENSG00000171872", "ENSG00000165556", "ENSG00000111704", "ENSG00000107485")
+
+#mclapply(setNames(names(genes.reg), names(genes.reg))[selected], function(geneID){
+mclapply(setNames(names(genes.reg), names(genes.reg)), function(geneID){
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                        Granges to plot                                   ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  # Get list of peak regulating gene
+  peaksIDs <- rownames(genes.reg[[geneID]])
+  # Granges of eaks and gene
+  gene.granges <- hsapiens.genes[geneID]
+  peak.granges <- atac.peaks.granges[peaksIDs]
+  
+  
+  #filter Top distance
+  inrange <- distance(gene.granges, peak.granges) < params$plot_window
+  # if not peak in range finish loop
+  if (sum(inrange) == 0) return(FALSE) 
+  
+  peak.granges <- peak.granges[inrange]
+  peaksIDs <- peaksIDs[inrange]
+  genes.reg[[geneID]] <- genes.reg[[geneID]][inrange,,drop=FALSE]
+  print(distance(gene.granges, peak.granges))
+  
+  # Granges to plot gene and peaks
+  mcols(gene.granges)$Type <- "Gene"
+  mcols(peak.granges)$Type <- "Peak"
+  gr2plot <- c(gene.granges[, "Type"], peak.granges[, "Type"])
+  
+  # Granges to arch
+  ## number of peaks
+  n <- length(peak.granges)
+  ## Chromosome 
+  ch <- rep(as.character(seqnames(gene.granges)), n)
+  ##strand
+  #st <- as.character(strand(gene.granges))
+  ## Gene start
+  start <- rep(start(gene.granges), n)
+  ## Midddle of peak
+  end <- start(resize(peak.granges, width=1, fix="center"))
+  
+  start.c <- start
+  start.c[start > end] <- end[start > end]
+  end.c   <- end
+  end.c[start > end]   <- start[start > end]
+  
+  ## Build granges
+  gr_arch <- GRanges(seqnames = ch,
+                     IRanges(start = start.c,
+                             end   = end.c))
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                              Peak "Heatmap"                              ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  gg_pheat <- lapply(setNames(levels(cells.clusters), levels(cells.clusters)), function(cluster){
+    # Find cell IDs
+    cellID <- colnames(rna.exprs)[cells.clusters %in% cluster]
+    # one range for each cell
+    peak.granges.pid <- peak.granges[rep(names(peak.granges), length(cellID))]
+    # extract accesibility scores
+    paccs <- atac.exprs[peaksIDs, cellID, drop=FALSE]
+    # Order cells by hierarchical clustering
+    cl <- hclust(dist(t(paccs)))
+    # Id each range to a single cell
+    mcols(peak.granges.pid)$Type <- factor(rep(cellID, length(peak.granges)), levels = cl$labels[cl$order])
+    # find accesibility of each peak
+    paccs[paccs==1] <- NA
+    mcols(peak.granges.pid)$exprs <- as.numeric(paccs)
+    
+    size <- 7/length(cellID)
+    p.pid <- 
+      ggplot() + 
+      geom_segment(data=peak.granges.pid, size=size, aes(group=Type, color=exprs)) + 
+      scale_color_gradientn(colours = plasma(100, begin=.0, end=.5), limits=c(1,6.6), na.value = NA) +
+      tm +
+      theme(axis.title.y = element_blank(),
+            axis.text.y  = element_blank(),
+            axis.ticks.y = element_blank()) 
+    return(p.pid)
+  })
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                        Gene and peak expression                          ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  gg_exprs <- lapply(setNames(levels(cells.clusters), levels(cells.clusters)), function(cluster){
+    mcols(gr2plot)$exprs <- c(rowMeans(rna.exprs[geneID, cells.clusters %in% cluster, drop=FALSE]),
+                              rowMeans(atac.exprs[peaksIDs, cells.clusters %in% cluster, drop=FALSE]))
+    pg <- ggplot(gr2plot) + 
+      geom_segment(size=3, aes(group=Type, color=exprs)) + 
+      scale_color_gradientn(colours = viridis(100), limits=c(1,14)) +
+      tm +
+      theme(axis.text.y = element_text(size=5))
+    return(pg)
+  })
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                                Arch                                      ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  
+  gg_regu <- lapply(setNames(levels(cells.clusters), levels(cells.clusters)), function(cluster){
+    mcols(gr_arch)$prop <- genes.reg[[geneID]][,cluster]
+    gr_arch <- gr_arch[mcols(gr_arch)$prop > 0]
+    
+    arc <- ggplot(gr_arch) +
+      geom_arch(gr_arch, aes(color=prop, height=prop), size=1) + 
+      #scale_size_continuous(limits = c(0,1)) +
+      scale_color_gradientn(colours = inferno(100), limits=c(0,1)) +
+      scale_y_continuous(limits = c(0,1)) +
+      tm +
+      theme(axis.text.y = element_text(size=5))
+
+    
+    return(arc)
+    
+  })
+  print(names(gg_regu))
+  
+  if (params$assayID == "CellLines") {
+    tracks.r <- tracks(
+      HCT = gg_regu[[1]], gg_exprs[[1]], gg_pheat[[1]],
+      Hela = gg_regu[[2]], gg_exprs[[2]], gg_pheat[[2]],
+      K562 = gg_regu[[3]], gg_exprs[[3]], gg_pheat[[3]],
+      heights = c(.5,.05,.1, .5,.05,.1, .5,.05,.1)) #+ xlim(min, max)
+  } else if (params$assayID == "HumanEmbryo") {
+    tracks.r <- tracks(
+      Blastocyst = gg_regu[[1]], gg_exprs[[1]], gg_pheat[[1]],
+      Morula     = gg_regu[[2]], gg_exprs[[2]], gg_pheat[[2]],
+      heights = c(.5,.05,.1, .5,.05,.1)) #+ xlim(min, max)
+  } else if (params$assayID == "PDX") {
+    tracks.r <- tracks(
+      PDX1 = gg_regu[[1]], gg_exprs[[1]], gg_pheat[[1]],
+      PDX2 = gg_regu[[2]], gg_exprs[[2]], gg_pheat[[2]],
+      heights = c(.5,.05,.1, .5,.05,.1)) #+ xlim(min, max)
+  
+  } else {
+    stop(paste0("No tracks builder founf for assay ", params$assayID, ":\n please modify script 08_RegulatoryRelationships_PlotArches_CellType.Rmd"))
+  }
+  
+  
+  #print(tracks.r)
+  plotpath <- paste0(plotdir, mcols(gene.granges)$symbol, "_", geneID, ".pdf")
+  #print(plotpath)
+  ggsave(filename = plotpath,
+         plot=tracks.r,
+         width=6, height=6)
+  
+  return(TRUE)
+
+}, mc.cores=MC_CORES)
+
+
+
+
+
+
+
+```
+

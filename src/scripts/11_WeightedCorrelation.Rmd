@@ -1,0 +1,340 @@
+---
+title: "scCAT-seq chromatin accessibility and transcriptome integration, Weighted Correlation"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    mathjax: null
+params:
+  assayID:  "foo"
+  work_dir: ""
+  omicsID:  "rna_atac"
+  window:   50000
+  wcorr_test: "Spearman"
+  NMFoptK_atac: 2
+  NMFoptK_rna_atac: 2
+  matrix_rna:  "path/to/matrix_rna"
+  matrix_atac: "path/to/matrix_atac"
+  granges:     "path/to/granges"
+  wcorr_p2p: "path/to/output"
+  wcorr_g2p: "path/to/output"
+  peak2gene: "path/to/output"
+  
+  
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+#library(kableExtra)
+#library(viridis)
+library(parallel)
+library(GenomicRanges)
+library(dplyr)
+library(tidyr)
+
+
+MC_CORES <- 48L
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                            Cores to mclapply                               ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+MC_CORES <- 5L
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                               Window Size                                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+up_down <- params$window
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Promoter Window Size                              ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+promoter.window <- 1000
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                       Select Correlation method                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+corr.method <- params$wcorr_test
+
+
+```
+
+# `r params$assayID`
+
+# Data loading
+  
+Read normalized RNA and ATACseq data
+Read ATACseq peaks as Granges
+
+
+  
+```{r dataloading, results='hide', cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Read normalized Expression matrices                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+rna.exprs   <- readRDS(params$matrix_rna)
+atac.exprs  <- readRDS(params$matrix_atac)
+
+# Use same ID
+colnames(atac.exprs)  <- colnames(rna.exprs)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Read ATACseq Peaks as GRanges                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.peaks.granges <- readRDS(params$granges)
+atac.peaks.granges <- atac.peaks.granges[rownames(atac.exprs)]
+
+length(atac.peaks.granges)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Granges of human genes                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+library(EnsDb.Hsapiens.v75)
+edb <- EnsDb.Hsapiens.v75
+organism(edb)
+# supportedFilters(edb)
+## Change the seqlevels style form Ensembl (default) to UCSC:
+seqlevelsStyle(edb) <- "UCSC"
+
+hsapiens.genes <- genes(edb)
+
+```
+
+# Nearby Peaks
+Identify peaks in promoter and distal peaks
+
+```{r findNearbyPeaks, cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                       Find nearby peaks to all genes                       ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Extend region by the predetermined window size
+hsapiens.genes.flank <- trim(resize(hsapiens.genes, width = up_down*2 + width(hsapiens.genes), fix = "center"))
+# Overlap with peaks
+peak2gene <- as.data.frame(findOverlaps(hsapiens.genes.flank, atac.peaks.granges))
+dim(peak2gene)
+
+# Add gene and peak IDs
+peak2gene$geneID <- names(hsapiens.genes.flank)[peak2gene$queryHits]
+peak2gene$peakID <- names(atac.peaks.granges)[peak2gene$subjectHits]
+
+# Find distance from gene to peak pairs
+hsapiens.tss <- resize(hsapiens.genes, 1, fix="start")
+peak2gene$distance <- distance(hsapiens.genes[peak2gene$geneID],atac.peaks.granges[peak2gene$peakID])
+peak2gene$distanceToTSS <- distance(hsapiens.tss[peak2gene$geneID],atac.peaks.granges[peak2gene$peakID])
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                         Find promoters of all genes                        ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Extract promoters from Ensembl DB
+
+hsapiens.promoters <- promoters(edb, upstream = promoter.window, downstream = promoter.window, filter=GeneIdFilter(peak2gene$geneID))
+
+p2pro <- data.frame(peakID=peak2gene$peakID[match(mcols(hsapiens.promoters)$gene_id, peak2gene$geneID)],
+                    geneID=peak2gene$geneID[match(mcols(hsapiens.promoters)$gene_id, peak2gene$geneID)],
+                    promID=names(hsapiens.promoters))
+# Overlap of peaks with promoters
+tmp.prom.overlap <- findOverlaps(hsapiens.promoters[p2pro$promID],atac.peaks.granges[p2pro$peakID])
+tmp.prom.overlap <- tmp.prom.overlap[from(tmp.prom.overlap) == to(tmp.prom.overlap)]
+# Asign to peak-promoter df
+p2pro$Promoter <- FALSE; p2pro$Promoter[from(tmp.prom.overlap)] <- TRUE
+sum(p2pro$Promoter)
+# Summarize by gene ID
+p2pro <- p2pro %>%
+  group_by(geneID, peakID) %>%
+  summarise(Promoter=sum(Promoter)>0) %>%
+  ungroup() %>%
+  dplyr::mutate(map=paste0(geneID, peakID))
+sum(p2pro$Promoter)
+# Asign to trainSet
+peak2gene$Promoter <- p2pro$Promoter[match(paste0(peak2gene$geneID,peak2gene$peakID), p2pro$map)]
+peak2gene$Promoter[is.na(peak2gene$Promoter)] <- FALSE
+sum(peak2gene$Promoter)
+
+rm(p2pro, tmp.prom.overlap, hsapiens.promoters)
+###############
+###############
+# Find promoters manually
+#hsapiens.promoters <- promoters(hsapiens.genes, upstream = promoter.window, downstream = promoter.window)
+hsapiens.promoters <- promoters(hsapiens.tss, upstream = promoter.window, downstream = promoter.window)
+# Overlap peaks with promoters
+tmp.prom.overlap <- findOverlaps(hsapiens.promoters[peak2gene$geneID],atac.peaks.granges[peak2gene$peakID])
+tmp.prom.overlap <- tmp.prom.overlap[from(tmp.prom.overlap) == to(tmp.prom.overlap)]
+
+# Asign to trainSet
+peak2gene$Promoter[from(tmp.prom.overlap)] <- TRUE
+sum(peak2gene$Promoter)
+
+rm(hsapiens.genes.flank, hsapiens.promoters, tmp.prom.overlap)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##           Keep genes with peaks in promoter and distal peaks               ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+count.promoter.distal <- peak2gene %>%
+  group_by(geneID) %>%
+  summarise(nPromoter = sum(Promoter), nDistal = sum(!Promoter)) %>%
+  ungroup() %>%
+  as.data.frame()
+
+head(count.promoter.distal)
+#Number of genes with peaks in promoter but no distal peaks
+sum(count.promoter.distal$nPromoter > 0 & !count.promoter.distal$nDistal > 0)
+# 3Kb = 7, 1Kb = 5
+
+#Number of genes without peaks in promoter but with distal peaks
+sum((!count.promoter.distal$nPromoter > 0) & count.promoter.distal$nDistal > 0)
+# 3Kb = 32063, 1Kb = 36572
+
+#Number of genes with peaks in promoter and distal peaks
+sum(count.promoter.distal$nPromoter > 0 & count.promoter.distal$nDistal > 0)
+# 3Kb = 22938, 1Kb = 18431
+
+genesIDs <- count.promoter.distal$geneID[count.promoter.distal$nPromoter > 0 & count.promoter.distal$nDistal > 0]
+names(genesIDs) <- genesIDs
+
+dim(peak2gene)
+#peak2gene <- peak2gene[peak2gene$geneID %in% genesIDs,]
+gc()
+```
+
+# Weighted correlation
+
+`r params$wcorr_test` weighted correlation
+The weights are extracted from the normalized Hmatrix
+Results is list with one matrix for each NMF signature
+
+```{r ATACWcorr, cache=FALSE, message=FALSE, warning=FALSE}
+library(wCorr)
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                 Read normalized ATACSEQ NMF H matrix                       ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.hmatrix.path <-  paste0(params$work_dir, "/", params$assayID, "/atac/NMF/Hnormalized/K", params$NMFoptK_atac, "/NMF_hmatrix.K", params$NMFoptK_atac, ".RDS")
+
+
+hmatrix <- readRDS(atac.hmatrix.path)
+signatureIDs <- setNames(rownames(hmatrix), rownames(hmatrix))
+
+# Keep only genes with peak in promoter and distal peaks
+peak2gene.atac <- peak2gene[peak2gene$geneID %in% genesIDs,]
+peak2gene.list <- split(peak2gene.atac, as.factor(peak2gene.atac$geneID))
+peak2gene.list <- lapply(peak2gene.list, function(sub.peak2gene){
+  return(list(peak2gene.annot = sub.peak2gene,
+              sub.atac.exprs = atac.exprs[sub.peak2gene$peakID,]))
+})
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##       Weighted correlation peaks in promoter vs distal peaks               ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+atac.p2d.wcorr <- mclapply(peak2gene.list, function(sub.peak2gene){
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                            Original                                      ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  peaks.IDs.promoter <- sub.peak2gene$peak2gene.annot$peakID[sub.peak2gene$peak2gene.annot$Promoter]
+  names(peaks.IDs.promoter) <- peaks.IDs.promoter
+  peaks.IDs.distal   <- sub.peak2gene$peak2gene.annot$peakID[!sub.peak2gene$peak2gene.annot$Promoter]
+  names(peaks.IDs.distal) <- peaks.IDs.distal
+  
+  corrBySig <- do.call(rbind, lapply(peaks.IDs.distal, function(peakID.distal){
+    do.call(cbind, lapply(signatureIDs, function(signatureID){
+      corr.promoter.distal <- sapply(peaks.IDs.promoter, function(peakID.promoter){
+        weightedCorr(sub.peak2gene$sub.atac.exprs[peakID.distal,], sub.peak2gene$sub.atac.exprs[peakID.promoter,],
+                     method  = corr.method,
+                     weights = hmatrix[signatureID,],
+                     fast = TRUE)
+      })
+      # If there are 2 or more peaks in the promter, retunr only the highest correlation
+      setNames(corr.promoter.distal[which.max(abs(corr.promoter.distal))], peakID.distal)
+    }))
+  }))
+  #wCorr.original <- do.call(rbind, corrBySig)
+  # rownames(wCorr.original) <- paste0(geneID, "|", peakIDs.bygene)
+}, mc.cores=MC_CORES)
+gc()
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Save Weighted Correlation                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+saveRDS(atac.p2d.wcorr, file = params$wcorr_p2p)
+
+
+
+
+
+```
+
+```{r ATAC_RNAWcorr, cache=FALSE, message=FALSE, warning=FALSE}
+library(wCorr)
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                   Read normalized NMF H matrix                             ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.hmatrix.path <-  paste0(params$work_dir, "/", params$assayID, "/rna_atac/NMF/Hnormalized/K", params$NMFoptK_atac, "/NMF_hmatrix.K", params$NMFoptK_atac, ".RDS")
+
+hmatrix <- readRDS(atac.hmatrix.path)
+dim(hmatrix)
+signatureIDs <- setNames(rownames(hmatrix), rownames(hmatrix))
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                 Keep expressed genes and peaks with signal                 ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+peak2gene.rna_atac <- peak2gene[peak2gene$geneID %in% rownames(rna.exprs),]
+peak2gene.rna_atac <- peak2gene.rna_atac[peak2gene.rna_atac$peakID %in% rownames(atac.exprs),]
+dim(peak2gene.rna_atac)
+
+
+peak2gene.list <- split(peak2gene.rna_atac, as.factor(peak2gene.rna_atac$geneID))
+#peak2gene.list[1]
+peak2gene.list <- lapply(peak2gene.list, function(sub.peak2gene){
+  return(list(peakID = sub.peak2gene$peakID,
+              rna.exprs = rna.exprs[sub.peak2gene$geneID[1],],
+              atac.exprs = atac.exprs[sub.peak2gene$peakID, , drop=FALSE]))
+})
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##        Correlation between gene expression and peak accesibility           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+nra_atac.g2d.wcorr <- mclapply(peak2gene.list, function(sub.peak2gene){
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                            Original                                      ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  peaks.IDs   <- sub.peak2gene$peakID
+  names(peaks.IDs) <- peaks.IDs
+  
+  corrBySig <- do.call(rbind, lapply(peaks.IDs, function(peakID){
+    sapply(signatureIDs, function(signatureID){
+      weightedCorr(sub.peak2gene$atac.exprs[peakID,], sub.peak2gene$rna.exprs,
+                   method  = corr.method,
+                   weights = hmatrix[signatureID,],
+                   fast = TRUE)
+    })
+  }))
+}, mc.cores=MC_CORES)
+nra_atac.g2d.wcorr[1]
+length(nra_atac.g2d.wcorr)
+gc()
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Save Weighted Correlation                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+saveRDS(nra_atac.g2d.wcorr, file = params$wcorr_g2p)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Save Annotation                                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+saveRDS(peak2gene, file = params$peak2gene)
+
+
+
+
+```

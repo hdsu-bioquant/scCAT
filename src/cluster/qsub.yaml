@@ -1,0 +1,83 @@
+#==============================================================================#
+#                     Cluster config for a qsub system                         #
+#==============================================================================#
+# Default Rule
+__default__:
+    walltime: 04:00:00
+    cores: 1
+    memory: 1g
+
+#==============================================================================#
+#                                  Stage 1                                     #
+#==============================================================================#
+NMF_rna:
+    walltime: 03:00:00
+    memory: 10g
+
+NMF_atac:
+    walltime: 12:00:00
+    memory: 25g
+
+NMF_joint:
+    walltime: 18:00:00
+    memory: 30g
+
+#==============================================================================#
+#                                  Stage 2                                     #
+#==============================================================================#
+
+scenic_GRNBoost:
+    walltime: 02:00:00
+    cores: 6
+    memory: 10g
+    
+scenic_RcisTarget:
+    walltime: 03:00:00
+    cores: 24
+    memory: 30g
+
+scenic_AUCell:
+    walltime: 01:00:00
+    cores: 1
+    memory: 2g
+
+scenic_AUCell:
+    walltime: 01:00:00
+    cores: 1
+    memory: 2g
+
+motif_match:
+    walltime: 04:00:00
+    cores: 48
+    memory: 110g
+
+active_accesible_peaks:
+    walltime: 02:00:00
+    cores: 10
+    memory: 60g
+    
+regulatory_relationships:
+    walltime: 03:00:00
+    cores: 10
+    memory: 100g
+    
+regulatory_relationships_arches:
+    walltime: 06:00:00
+    cores: 48
+    memory: 100g
+    
+regulatory_relationships_heatmaps:
+    walltime: 03:00:00
+    cores: 48
+    memory: 100g
+
+weighted_correlation:
+    walltime: 02:00:00
+    cores: 48
+    memory: 30g
+
+regulatory_relationships_NMF:
+    walltime: 18:00:00
+    memory: 30g
+
+

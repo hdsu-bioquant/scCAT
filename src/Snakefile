@@ -1,0 +1,763 @@
+# IMPORT python libraries
+from os.path import join
+import re
+DIR_E = '.dexist'
+
+# Import config file & parameters
+configfile: 'configs/configfile.yaml'
+
+
+localrules: all, install_missing_R01, install_missing_R02
+
+
+
+# Import sample information from config file
+ASSAYS   = config['assayIDs'].split(' ')
+
+# Import paths from config file
+DATAPATH=config['datapath']
+#SRCPATH=config['srcpath']
+RESULTSPATH=config['resultspath']
+
+
+#================================================================================#
+#                             Print Assays IDs.                                  #
+#================================================================================#
+   
+    
+def printExp():
+  print("-------------------------------")
+  print("Provided assays IDs:")
+  for i in range(len(ASSAYS)):
+      print(ASSAYS[i])
+  print("-------------------------------")
+  print("")
+#printExp()
+
+
+
+#================================================================================#
+#                        Collect final files from pipeline                       #
+#================================================================================#
+
+
+#helper function to collect final files from pipeline
+def inputall(wilcards):
+    collectfiles = []
+    # Regulatory Relationships Validation
+    if config["stage3"]["regulatory_relationships"]:
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_12_RegulatoryRelationships_validation.html'), zip, assay=ASSAYS))
+    # Weighted Correlation
+    if config["stage2"]["weightedCorr"]:
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_11_WeightedCorrelation.html'), zip, assay=ASSAYS))
+        collectfiles.append('.snakemake/completeLibrary02.txt')
+        #collectfiles.append('tmp.txt')
+    # Regulatory Relationships
+    if config["stage3"]["regulatory_relationships"]:
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_10_RegulatoryRelationships_NMF.html'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_09_RegulatoryRelationships_PlotHeatmaps_CellType.html'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_08_RegulatoryRelationships_PlotArches_CellType.html'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_07_RegulatoryRelationships.html'), zip, assay=ASSAYS))
+    # Motif Match
+    if config["stage2"]["find_active_peaks"]:
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_06_Active_accessible_peaks.html'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_05_nearbyPeaks_MotifMatch.html'), zip, assay=ASSAYS))
+    # SCENIC
+    if config["stage2"]["SCENIC"]:
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/rna/scenic/{assay}_binary_AUC.csv'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/rna/scenic/phases/03_regulons.bin'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/rna/scenic/phases/00_exMatFilt.csv'), zip, assay=ASSAYS))
+        collectfiles.append('db/HumanMotifAnnotation/motifs-v9-nr.hgnc-m0.001-o0.0.tbl')
+    # NMF
+    if config["stage1"]["NMF"]:
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_04_NMF_Joint.html'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_03_NMF_ATACseq.html'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_02_NMF_RNAseq.html'), zip, assay=ASSAYS))
+    #Preprocessing
+    if config["stage1"]["preprocessing"]:
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_01_preprocessing_ATACseq.html'), zip, assay=ASSAYS))
+        collectfiles.extend(expand(join(RESULTSPATH, '{assay}/reports/{assay}_00_preprocessing_RNAseq.html'), zip, assay=ASSAYS))
+        
+    
+    #return final list of all files to collect from the pipeline
+    return collectfiles
+
+# Collect pipeline result files
+rule all:
+    input: inputall
+
+
+#================================================================================#
+#                     Regulatory Relationships Validation                        #
+#================================================================================#
+rule regulatory_relationships_validation:
+    input: 
+        normcounts_rna  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        normcounts_atac = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        granges   = join(DATAPATH, '{assay}/atac/{assay}_ATACseqGRanges.RDS'),
+        wcorr_p2p = join(RESULTSPATH, ('{assay}/atac/wCorr/{assay}_Peak2Peak_wCorr_' + config['wcorr_test'] + '_' + str(config['wcorr_window']//1000) + 'Kb.RDS')),
+        wcorr_g2p = join(RESULTSPATH, ('{assay}/rna_atac/wCorr/{assay}_Gene2Peak_wCorr_' + config['wcorr_test'] + '_' + str(config['wcorr_window']//1000) + 'Kb.RDS')),
+        regrel    = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/{assay}_regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        peak2gene = join(RESULTSPATH, ('{assay}/rna_atac/wCorr/{assay}_peak2gene_' + str(config['wcorr_window']//1000) + 'Kb.RDS')),
+        chiapet   = join(DATAPATH, config['chiapet']), 
+    output:
+        chiapet_val = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/{assay}_regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb_ChIA-PET-Validation.RDS')),
+        report      = join(RESULTSPATH, '{assay}/reports/{assay}_12_RegulatoryRelationships_validation.html'),
+        rmd         = temp(join(RESULTSPATH, '{assay}/reports/{assay}_12_RegulatoryRelationships_validation.Rmd'))
+    params:
+        script  = 'scripts/12_RegulatoryRelationships_validation.Rmd',
+        assayID = '{assay}',
+        wcorr_test       = config['wcorr_test'],
+        wcorr_window     = config['wcorr_window'],
+        workdir = RESULTSPATH
+    conda: 'envs/R3.4.1.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID          = '{params.assayID}', \
+                  work_dir         = '{params.workdir}', \
+                  window           = {params.wcorr_window}, \
+                  wcorr_test       = '{params.wcorr_test}', \
+                  matrix_atac = '{input.normcounts_atac}', \
+                  granges     = '{input.granges}', \
+                  regrel      = '{input.regrel}', \
+                  ChIA_PET    = '{input.chiapet}', \
+                  peak2gene   = '{input.peak2gene}', \
+                  wcorr_p2p   = '{input.wcorr_p2p}', \
+                  wcorr_g2p   = '{input.wcorr_g2p}', \
+                  chiapet_val = '{output.chiapet_val}' \
+                ))"
+    
+        
+        """
+    
+
+#================================================================================#
+#                         Weighted Correlation.                                  #
+#================================================================================#
+# Compute weighted correlation between 
+# Promoter peaks and Distal peaks signal
+# Gene Expression and Distal peaks signal
+rule weighted_correlation:
+    input: 
+        normcounts_rna  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        normcounts_atac = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        regrel   = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/{assay}_regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        granges  = join(DATAPATH, '{assay}/atac/{assay}_ATACseqGRanges.RDS'),
+        metadata = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS'),
+        install  = ".snakemake/completeLibrary02.txt"
+    output:
+        wcorr_p2p = join(RESULTSPATH, ('{assay}/atac/wCorr/{assay}_Peak2Peak_wCorr_' + config['wcorr_test'] + '_' + str(config['wcorr_window']//1000) + 'Kb.RDS')),
+        wcorr_g2p = join(RESULTSPATH, ('{assay}/rna_atac/wCorr/{assay}_Gene2Peak_wCorr_' + config['wcorr_test'] + '_' + str(config['wcorr_window']//1000) + 'Kb.RDS')),
+        peak2gene = join(RESULTSPATH, ('{assay}/rna_atac/wCorr/{assay}_peak2gene_' + str(config['wcorr_window']//1000) + 'Kb.RDS')),
+        report    = join(RESULTSPATH, '{assay}/reports/{assay}_11_WeightedCorrelation.html'),
+        rmd  = temp(join(RESULTSPATH, '{assay}/reports/{assay}_11_WeightedCorrelation.Rmd'))
+    params:
+        script  = 'scripts/11_WeightedCorrelation.Rmd',
+        assayID = '{assay}',
+        wcorr_test       = config['wcorr_test'],
+        wcorr_window     = config['wcorr_window'],
+        NMFoptK_atac     = lambda wildcards: config['NMFparams'][wildcards.assay]['optimalK']['atac'],
+        NMFoptK_rna_atac = lambda wildcards: config['NMFparams'][wildcards.assay]['optimalK']['rna_atac'],
+        workdir = RESULTSPATH
+    conda: 'envs/R3.4.1.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID          = '{params.assayID}', \
+                  work_dir         = '{params.workdir}', \
+                  window           = {params.wcorr_window}, \
+                  wcorr_test       = '{params.wcorr_test}', \
+                  NMFoptK_atac     = {params.NMFoptK_atac}, \
+                  NMFoptK_rna_atac = {params.NMFoptK_rna_atac}, \
+                  matrix_rna  = '{input.normcounts_rna}', \
+                  matrix_atac = '{input.normcounts_atac}', \
+                  granges     = '{input.granges}', \
+                  peak2gene = '{output.peak2gene}', \
+                  wcorr_p2p = '{output.wcorr_p2p}', \
+                  wcorr_g2p = '{output.wcorr_g2p}' \
+                ))"
+    
+        
+        """
+
+
+# Install missing R packages in conda env cuda_R3.4
+rule install_missing_R_02:
+    output: ".snakemake/completeLibrary02.txt"
+    params:
+        script = 'scripts/install_R_packages02.R',
+    conda: 'envs/R3.4.1.yaml'
+    shell:
+        """
+        
+        Rscript {params.script}
+        touch {output}
+        
+        """
+
+
+
+
+
+
+
+#================================================================================#
+#                            Regulatory Relationships                            #
+#================================================================================#
+# Regulatory Relationships NMF
+rule regulatory_relationships_NMF:
+    input: 
+        regrel   = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/{assay}_regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        cyclone  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_cellCycle_assignments.RDS'),
+        metadata = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS')
+    output:
+        regrel   = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/NMF/{assay}_normNMF_regulatoryRelationships.RDS')),
+        norm_nmf = join(RESULTSPATH, '{assay}/rna_atac/NMF/{assay}_normNMF_Joint.RDS'),
+        report   = join(RESULTSPATH, '{assay}/reports/{assay}_10_RegulatoryRelationships_NMF.html'),
+        rmd = temp(join(RESULTSPATH, '{assay}/reports/{assay}_10_RegulatoryRelationships_NMF.Rmd'))
+    params:
+        script   = 'scripts/10_RegulatoryRelationships_NMF.Rmd',
+        assayID  = '{assay}',
+        workdir  = RESULTSPATH,
+        window   = config['match_window'],
+        nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
+        nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
+        nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  nmf_kmin = '{params.nmf_kmin}', \
+                  nmf_kmax = '{params.nmf_kmax}', \
+                  nmf_iter = '{params.nmf_iter}', \
+                  window   = {params.window}, \
+                  regrel      = '{input.regrel}', \
+                  metadata    = '{input.metadata}', \
+                  cyclone     = '{input.cyclone}', \
+                  norm_nmf = '{output.norm_nmf}' \
+                ))"
+    
+        
+        """
+
+
+
+
+# Plot Regulatory Relationships heatmaps plots
+rule regulatory_relationships_heatmaps:
+    input: 
+        normcounts_rna  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        normcounts_atac = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        regrel   = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/{assay}_regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        granges  = join(DATAPATH, '{assay}/atac/{assay}_ATACseqGRanges.RDS'),
+        metadata = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS')
+    output:
+        report   = join(RESULTSPATH, '{assay}/reports/{assay}_09_RegulatoryRelationships_PlotHeatmaps_CellType.html'),
+        rmd = temp(join(RESULTSPATH, '{assay}/reports/{assay}_09_RegulatoryRelationships_PlotHeatmaps_CellType.Rmd'))
+    params:
+        script  = 'scripts/09_RegulatoryRelationships_PlotHeatmaps_CellType.Rmd',
+        assayID = '{assay}',
+        plot_window = config['match_window'],
+        workdir = RESULTSPATH
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID     = '{params.assayID}', \
+                  work_dir    = '{params.workdir}', \
+                  plot_window = {params.plot_window}, \
+                  matrix_rna  = '{input.normcounts_rna}', \
+                  matrix_atac = '{input.normcounts_atac}', \
+                  regrel      = '{input.regrel}', \
+                  granges     = '{input.granges}', \
+                  metadata    = '{input.metadata}' \
+                ))"
+    
+        
+        """
+
+
+# Plot Regulatory Relationships links plots
+rule regulatory_relationships_arches:
+    input: 
+        normcounts_rna  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        normcounts_atac = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        regrel   = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/{assay}_regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        granges  = join(DATAPATH, '{assay}/atac/{assay}_ATACseqGRanges.RDS'),
+        metadata = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS')
+    output:
+        report   = join(RESULTSPATH, '{assay}/reports/{assay}_08_RegulatoryRelationships_PlotArches_CellType.html'),
+        rmd = temp(join(RESULTSPATH, '{assay}/reports/{assay}_08_RegulatoryRelationships_PlotArches_CellType.Rmd'))
+    params:
+        script  = 'scripts/08_RegulatoryRelationships_PlotArches_CellType.Rmd',
+        assayID = '{assay}',
+        plot_window = config['plot_window'],
+        workdir = RESULTSPATH
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID     = '{params.assayID}', \
+                  work_dir    = '{params.workdir}', \
+                  plot_window = {params.plot_window}, \
+                  matrix_rna  = '{input.normcounts_rna}', \
+                  matrix_atac = '{input.normcounts_atac}', \
+                  regrel      = '{input.regrel}', \
+                  granges     = '{input.granges}', \
+                  metadata    = '{input.metadata}' \
+                ))"
+    
+        
+        """
+
+
+# Compute Regulatory Relationships, by finding Active acccessible peaks related with a change in expression
+rule regulatory_relationships:
+    input: 
+        activeaccess = join(RESULTSPATH, ('{assay}/rna_atac/motifMatch/{assay}_active_accessible_peaks' + str(config['match_window']//1000) + 'Kb.RDS')),
+        normcounts_rna  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS')
+    output:
+        diffexpr = join(RESULTSPATH, ('{assay}/rna_atac/motifMatch/{assay}_active_accessible_peaks' + str(config['match_window']//1000) + 'Kb_diffExprsTest.RDS')),
+        regrel   = join(RESULTSPATH, ('{assay}/rna_atac/regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb/{assay}_regulatoryRelationships_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        report   = join(RESULTSPATH, '{assay}/reports/{assay}_07_RegulatoryRelationships.html'),
+        rmd = temp(join(RESULTSPATH, '{assay}/reports/{assay}_07_RegulatoryRelationships.Rmd'))
+    params:
+        script  = 'scripts/07_RegulatoryRelationships.Rmd',
+        assayID = '{assay}',
+        diff_exprs_test = config['diff_exprs_test'],
+        diff_exprs_threshold = config['diff_exprs_threshold'],
+        workdir = RESULTSPATH
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  testID   = '{params.diff_exprs_test}', \
+                  test.pt  = {params.diff_exprs_threshold}, \
+                  activeaccess = '{input.activeaccess}', \
+                  matrix_rna   = '{input.normcounts_rna}', \
+                  diffexpr = '{output.diffexpr}', \
+                  regrel   = '{output.regrel}' \
+                ))"
+    
+        
+        """
+
+
+# Find peaks with at leat one matched active TF and accessible at the same time
+rule active_accesible_peaks:
+    input: 
+        sce_atac     = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normSCE.RDS'),
+        peak2gene    = join(RESULTSPATH, ('{assay}/rna_atac/annotation/{assay}_peak2gene_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        active_peaks = join(RESULTSPATH, ('{assay}/rna_atac/motifMatch/{assay}_active_peaks.RDS'))
+    output:
+        activeaccess = join(RESULTSPATH, ('{assay}/rna_atac/motifMatch/{assay}_active_accessible_peaks' + str(config['match_window']//1000) + 'Kb.RDS')),
+        report       = join(RESULTSPATH, '{assay}/reports/{assay}_06_Active_accessible_peaks.html'),
+        rmd     = temp(join(RESULTSPATH, '{assay}/reports/{assay}_06_Active_accessible_peaks.Rmd'))
+    params:
+        script  = 'scripts/06_Active_accessible_peaks.Rmd',
+        assayID = '{assay}',
+        workdir = RESULTSPATH, 
+        window  = config['match_window']
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  sce_atac     = '{input.sce_atac}', \
+                  peak2gene    = '{input.peak2gene}', \
+                  active_peaks = '{input.active_peaks}', \
+                  activeaccess = '{output.activeaccess}' \
+                ))"
+    
+        
+        """
+
+# Match Motifs of Active TFs to ATACseq peaks
+rule motif_match:
+    input: 
+        normcounts_rna  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        normcounts_atac = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        granges         = join(DATAPATH, '{assay}/atac/{assay}_ATACseqGRanges.RDS'),
+        scenic_bin      = join(RESULTSPATH, '{assay}/rna/scenic/{assay}_binary_AUC.csv')
+    output:
+        peak2gene     = join(RESULTSPATH, ('{assay}/rna_atac/annotation/{assay}_peak2gene_' + str(config['match_window']//1000) + 'Kb.RDS')),
+        matchedmotifs = join(RESULTSPATH, ('{assay}/rna_atac/motifMatch/{assay}_matched_motifs.RDS')),
+        matched_tfs   = join(RESULTSPATH, ('{assay}/rna_atac/motifMatch/{assay}_matched_TFs.RDS')),
+        active_peaks  = join(RESULTSPATH, ('{assay}/rna_atac/motifMatch/{assay}_active_peaks.RDS')),
+        report     = join(RESULTSPATH, '{assay}/reports/{assay}_05_nearbyPeaks_MotifMatch.html'),
+        rmd   = temp(join(RESULTSPATH, '{assay}/reports/{assay}_05_nearbyPeaks_MotifMatch.Rmd'))
+    params:
+        script  = 'scripts/05_nearbyPeaks_MotifMatch.Rmd',
+        assayID = '{assay}',
+        workdir = RESULTSPATH, 
+        window  = config['match_window']
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  window   = {params.window}, \
+                  matrix_rna  = '{input.normcounts_rna}', \
+                  matrix_atac = '{input.normcounts_atac}', \
+                  granges     = '{input.granges}', \
+                  scenic      = '{input.scenic_bin}', \
+                  peak2gene     = '{output.peak2gene}', \
+                  matchedmotifs = '{output.matchedmotifs}', \
+                  matched_tfs   = '{output.matched_tfs}', \
+                  active_peaks  = '{output.active_peaks}' \
+                ))"
+    
+        
+        """
+
+
+
+#================================================================================#
+#                                        SCENIC                                  #
+#================================================================================#
+rule scenic_AUCell:
+    input: 
+        scenicmat  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
+        modules  = join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin'),
+        motif_annotation = 'db/HumanMotifAnnotation/motifs-v9-nr.hgnc-m0.001-o0.0.tbl'
+    output: 
+        scenic_auc = join(RESULTSPATH, '{assay}/rna/scenic/{assay}_AUC.csv'),
+        scenic_bin = join(RESULTSPATH, '{assay}/rna/scenic/{assay}_binary_AUC.csv')
+    params:
+        script = 'scripts/scenic/03_PHASE3_AUCell.py',
+        dbdir  = 'db/',
+        outdir = join(RESULTSPATH, '{assay}/rna/scenic'),
+        assayID = '{assay}'
+    conda: 'envs/scenic.yaml'
+    shell:
+        """
+        
+        python {params.script} --database_dir {params.dbdir} --results_dir {params.outdir} --exprs_mat {input.scenicmat} -id {params.assayID}
+        
+        """
+
+
+rule scenic_RcisTarget:
+    input: 
+        scenicmat  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
+        modules   = join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin'),
+        motif_annotation = 'db/HumanMotifAnnotation/motifs-v9-nr.hgnc-m0.001-o0.0.tbl'
+    output: 
+        regulonsbin = join(RESULTSPATH, '{assay}/rna/scenic/phases/03_regulons.bin'),
+        regulonstxt = join(RESULTSPATH, '{assay}/rna/scenic/{assay}_regulons.txt')
+    params:
+        script = 'scripts/scenic/02_PHASE2_RcisTarget.py',
+        dbdir  = 'db/',
+        outdir = join(RESULTSPATH, '{assay}/rna/scenic'),
+        assayID = '{assay}'
+    conda: 'envs/scenic.yaml'
+    shell:
+        """
+        
+        python {params.script} --database_dir {params.dbdir} --results_dir {params.outdir} --exprs_mat {input.scenicmat} -id {params.assayID}
+        
+        """
+
+
+rule scenic_GRNBoost:
+    input: 
+        scenicmat  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
+        motif_annotation = 'db/HumanMotifAnnotation/motifs-v9-nr.hgnc-m0.001-o0.0.tbl'
+    output: 
+        exprs_mat = join(RESULTSPATH, '{assay}/rna/scenic/phases/00_exMatFilt.csv'),
+        adjacen   = join(RESULTSPATH, '{assay}/rna/scenic/phases/01_adjacencies.csv'),
+        modules   = join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin')
+    params:
+        script = 'scripts/scenic/00_PHASE0_preprocessing.py',
+        dbdir  = 'db/',
+        outdir = join(RESULTSPATH, '{assay}/rna/scenic'),
+        assayID = '{assay}'
+    conda: 'envs/scenic.yaml'
+    shell:
+        """
+        
+        python {params.script} --database_dir {params.dbdir} --results_dir {params.outdir} --exprs_mat {input.scenicmat} -id {params.assayID}
+        
+        """
+
+
+# Download Databases ranking the whole genome of your species of interest based on regulatory features 
+# Motif annotation database providing the missing link between an enriched motif and the transcription factor that binds this motif.
+rule download_scenic_db:
+    output: 
+        feather_ups_10s     = 'db/HumanRankingDatabases/hg19-500bp-upstream-10species.mc9nr.feather',
+        feather_ups_7s      = 'db/HumanRankingDatabases/hg19-500bp-upstream-7species.mc9nr.feather',
+        feather_tss_10k10s  = 'db/HumanRankingDatabases/hg19-tss-centered-10kb-10species.mc9nr.feather',
+        feather_tss_5k10s   = 'db/HumanRankingDatabases/hg19-tss-centered-5kb-10species.mc9nr.feather',
+        feather_tss_10k7s   = 'db/HumanRankingDatabases/hg19-tss-centered-10kb-7species.mc9nr.feather',
+        feather_tss_5k7s    = 'db/HumanRankingDatabases/hg19-tss-centered-5kb-7species.mc9nr.feather',
+        motif_annotation    = 'db/HumanMotifAnnotation/motifs-v9-nr.hgnc-m0.001-o0.0.tbl'
+    conda: 'envs/scenic.yaml'
+    shell:
+        """
+        
+        baseurl="https://resources.aertslab.org/cistarget/databases/homo_sapiens/hg19/refseq_r45/mc9nr/gene_based/"
+        
+        curl $(echo $baseurl$(basename {output.feather_ups_10s}))    --output {output.feather_ups_10s}
+        curl $(echo $baseurl$(basename {output.feather_ups_7s}))     --output {output.feather_ups_7s}
+        curl $(echo $baseurl$(basename {output.feather_tss_10k10s})) --output {output.feather_tss_10k10s}
+        curl $(echo $baseurl$(basename {output.feather_tss_5k10s}))  --output {output.feather_tss_5k10s}
+        curl $(echo $baseurl$(basename {output.feather_tss_10k7s}))  --output {output.feather_tss_10k7s}
+        curl $(echo $baseurl$(basename {output.feather_tss_5k7s}))   --output {output.feather_tss_5k7s}
+        
+        curl https://resources.aertslab.org/cistarget/motif2tf/motifs-v9-nr.hgnc-m0.001-o0.0.tbl --output {output.motif_annotation}
+            
+        """
+
+
+
+#================================================================================#
+#                     Non-Negative Matrix Factorization                          #
+#================================================================================#
+# RNAseq & ATACseq NMF
+rule NMF_joint:
+    input: 
+        normcounts_rna  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        normcounts_atac = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        cyclone    = join(RESULTSPATH, '{assay}/rna/scater/{assay}_cellCycle_assignments.RDS'),
+        metadata   = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS')
+    output:
+        norm_nmf   = join(RESULTSPATH, '{assay}/rna_atac/NMF/{assay}_normNMF_Joint.RDS'),
+        report     = join(RESULTSPATH, '{assay}/reports/{assay}_04_NMF_Joint.html'),
+        rmd   = temp(join(RESULTSPATH, '{assay}/reports/{assay}_04_NMF_Joint.Rmd'))
+    params:
+        script  = 'scripts/04_NMF_Joint.Rmd',
+        assayID = '{assay}',
+        workdir = RESULTSPATH,
+        nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
+        nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
+        nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  nmf_kmin = '{params.nmf_kmin}', \
+                  nmf_kmax = '{params.nmf_kmax}', \
+                  nmf_iter = '{params.nmf_iter}', \
+                  matrix_rna  = '{input.normcounts_rna}', \
+                  matrix_atac = '{input.normcounts_atac}', \
+                  metadata    = '{input.metadata}', \
+                  cyclone     = '{input.cyclone}', \
+                  norm_nmf = '{output.norm_nmf}' \
+                ))"
+    
+        
+        """
+
+
+# ATACseq NMF
+rule NMF_atac:
+    input: 
+        normcounts = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        cyclone    = join(RESULTSPATH, '{assay}/rna/scater/{assay}_cellCycle_assignments.RDS'),
+        metadata   = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS')
+    output:
+        norm_nmf   = join(RESULTSPATH, '{assay}/atac/NMF/{assay}_normNMF_ATACseq.RDS'),
+        report     = join(RESULTSPATH, '{assay}/reports/{assay}_03_NMF_ATACseq.html'),
+        rmd   = temp(join(RESULTSPATH, '{assay}/reports/{assay}_03_NMF_ATACseq.Rmd'))
+    params:
+        script  = 'scripts/03_NMF_ATACseq.Rmd',
+        assayID = '{assay}',
+        workdir = RESULTSPATH,
+        nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
+        nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
+        nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  nmf_kmin = '{params.nmf_kmin}', \
+                  nmf_kmax = '{params.nmf_kmax}', \
+                  nmf_iter = '{params.nmf_iter}', \
+                  matrix   = '{input.normcounts}', \
+                  metadata = '{input.metadata}', \
+                  cyclone  = '{input.cyclone}', \
+                  norm_nmf = '{output.norm_nmf}' \
+                ))"
+    
+        
+        """
+
+
+#list(range(config['NMFparams']['{assay}']['k.min'], config['NMFparams']['{assay}']['k.min']))
+
+# RNAseq NMF
+rule NMF_rna:
+    input: 
+        normcounts = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        cyclone    = join(RESULTSPATH, '{assay}/rna/scater/{assay}_cellCycle_assignments.RDS'),
+        metadata   = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS')
+    output:
+        norm_nmf = join(RESULTSPATH, '{assay}/rna/NMF/{assay}_normNMF_RNAseq.RDS'),
+        report   = join(RESULTSPATH, '{assay}/reports/{assay}_02_NMF_RNAseq.html'),
+        rmd = temp(join(RESULTSPATH, '{assay}/reports/{assay}_02_NMF_RNAseq.Rmd'))
+    params:
+        script  = 'scripts/02_NMF_RNAseq.Rmd',
+        assayID = '{assay}',
+        workdir = RESULTSPATH,
+        nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
+        nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
+        nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  nmf_kmin = '{params.nmf_kmin}', \
+                  nmf_kmax = '{params.nmf_kmax}', \
+                  nmf_iter = '{params.nmf_iter}', \
+                  matrix   = '{input.normcounts}', \
+                  metadata = '{input.metadata}', \
+                  cyclone  = '{input.cyclone}', \
+                  norm_nmf = '{output.norm_nmf}' \
+                ))"
+        
+        """
+
+#================================================================================#
+#                     Normalization and Preprocessing                            #
+#================================================================================#
+# Preprocess raw peaks counts
+rule preprocess_atac:
+    input: 
+        counts   = join(DATAPATH, '{assay}/atac/{assay}_ATACseqCounts.RDS'),
+        granges  = join(DATAPATH, '{assay}/atac/{assay}_ATACseqGRanges.RDS'),
+        metadata = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS'),
+        installR = ".snakemake/completeLibrary.txt"
+    output:
+        normcounts = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normmat.RDS'),
+        countsSCE  = join(RESULTSPATH, '{assay}/atac/scater/{assay}_ATACseq_normSCE.RDS'),
+        report     = join(RESULTSPATH, '{assay}/reports/{assay}_01_preprocessing_ATACseq.html'),
+        rmd   = temp(join(RESULTSPATH, '{assay}/reports/{assay}_01_preprocessing_ATACseq.Rmd'))
+    params:
+        script  = 'scripts/01_preprocessing_ATACseq.Rmd',
+        assayID = '{assay}',
+        workdir = DATAPATH
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  counts   = '{input.counts}', \
+                  metadata = '{input.metadata}', \
+                  granges  = '{input.granges}', \
+                  normcounts = '{output.normcounts}', \
+                  countsSCE  = '{output.countsSCE}' \
+                ))"
+    
+        
+        """
+
+
+
+# Preprocess raw gene counts
+rule preprocess_rna:
+    input: 
+        counts   = join(DATAPATH, '{assay}/rna/{assay}_RNAseqCounts.RDS'),
+        metadata = join(DATAPATH, '{assay}/annotation/{assay}_metadata.RDS'),
+        installR = ".snakemake/completeLibrary.txt"
+    output:
+        normcounts = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normmat.RDS'),
+        countsSCE  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_normSCE.RDS'),
+        scenicmat  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
+        cyclone    = join(RESULTSPATH, '{assay}/rna/scater/{assay}_cellCycle_assignments.RDS'),
+        report     = join(RESULTSPATH, '{assay}/reports/{assay}_00_preprocessing_RNAseq.html'),
+        rmd   = temp(join(RESULTSPATH, '{assay}/reports/{assay}_00_preprocessing_RNAseq.Rmd'))
+    params:
+        script  = 'scripts/00_preprocessing_RNAseq.Rmd',
+        assayID = '{assay}',
+        workdir = DATAPATH
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        cp {params.script} {output.rmd}
+        
+        Rscript -e "rmarkdown::render( '{output.rmd}', \
+                params = list( \
+                  assayID  = '{params.assayID}', \
+                  work_dir = '{params.workdir}', \
+                  counts   = '{input.counts}', \
+                  metadata = '{input.metadata}', \
+                  normcounts = '{output.normcounts}', \
+                  countsSCE  = '{output.countsSCE}', \
+                  scenicmat  = '{output.scenicmat}', \
+                  cyclone  = '{output.cyclone}' \
+                ))"
+        
+        """
+
+
+# Install missing R packages in conda env cuda_R3.4
+rule install_missing_R_01:
+    output: ".snakemake/completeLibrary.txt"
+    params:
+        script  = 'scripts/install_R_packages01.R',
+    conda: 'envs/cuda_R3.4.yaml'
+    shell:
+        """
+        
+        Rscript {params.script}
+    
+        git clone https://github.com/cudamat/cudamat.git
+        pip install cudamat/
+        rm -rf cudamat
+    
+        touch {output}
+        
+        """
+

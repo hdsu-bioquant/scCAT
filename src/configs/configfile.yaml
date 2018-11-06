@@ -1,0 +1,148 @@
+#==============================================================================#
+# Author: Andres Quintero - a.quintero@dkfz.de
+# Date: 28.09.2018
+# Comments:
+#
+# INPUT:
+# data/
+# ├── CellLines/ 
+# │   ├── annotation/
+# │   │   └── CellLines_metadata.Rds 
+# │   ├── atac/
+# │   │   ├── CellLines_ATACseqCounts.Rds.Rds 
+# │   │   └── CellLines_ATACseqGRanges.Rds
+# │   └── rna/
+# │       └── CellLines_RNAseqCounts.Rds
+# ├── HumanEmbryo/ 
+#
+# OUTPUT:
+# resutls/
+# ├── CellLines/ 
+# │   ├── atac/
+# │   │   └── 
+# │   ├── rna/
+# │   │   ├── 
+# │   │   └── 
+# │   └── rna_atac/
+# │       └── 
+# ├── HumanEmbryo/ 
+
+#==============================================================================#
+### SAMPLE Info - REQUIRED PARAMETERS ####
+assayIDs: CellLines HumanEmbryo PDX
+
+sampletxt: data/sample_ids.txt # example file in data directory
+
+# Path where data is stored 
+datapath: /icgc/dkfzlsdf/analysis/B080/quintera/Projects/scCATseq_ATAC_RNA/pub_ready/data
+# Path where results will be saved
+resultspath: /icgc/dkfzlsdf/analysis/B080/quintera/Projects/scCATseq_ATAC_RNA/pub_ready/results
+
+#==============================================================================#
+#                         Pipeline Steps to Run                                #
+#==============================================================================#
+stage1:
+    preprocessing: True
+    NMF: True
+    
+stage2:
+    SCENIC: True
+    find_active_peaks: True
+    weightedCorr: True
+    
+stage3:
+    regulatory_relationships: True
+
+
+#==============================================================================#
+#                                NMF parameters                                #
+#==============================================================================#
+# Parameters to run Non-Negative Matrix Factorization in each assay
+# k.min: minimum number of signatures to decompose
+# k.max: maximun number of signatures to decompose
+# Iterations: number of outer iterations to run
+
+# Select NMF optimal K for each assay
+# After running NMF on the RNAseq, ATACseq and joint matrices during stage 1, 
+# check report and select optimal K for stage 2
+
+NMFparams:
+    CellLines: 
+        k.min: 2
+        k.max: 6
+        iterations: 2
+        optimalK:
+            atac: 3
+            rna: 3
+            rna_atac: 3
+    HumanEmbryo:  
+        k.min: 2
+        k.max: 6
+        iterations: 2
+        optimalK:
+            atac: 3
+            rna: 3
+            rna_atac: 3
+    PDX:  
+        k.min: 2
+        k.max: 6
+        iterations: 2
+        optimalK:
+            atac: 2
+            rna: 3
+            rna_atac: 3
+
+#==============================================================================#
+#                           Motif Match Parameters                             #
+#==============================================================================#
+# Parameters to match motifs of active transcription factor to accessible regions
+# window size to search from each gene tss (in base pairs)
+match_window: 1000000
+
+#==============================================================================#
+#                         Regulatory Relationships                             #
+#==============================================================================#
+# Parameters to compute regulatory relationships
+# diff_exprs_test: choose if t.test or wilcox.test
+diff_exprs_test: wilcox.test
+diff_exprs_threshold: 0.05
+
+# plot_window, window in pase pairs to plot regulatory relationships
+plot_window: 50000
+
+# Validation
+# Path to ChIA-PET interacting regions relative to the data directory
+chiapet: db/3DValidation/ChIA-PET.Hela.HCT.K562.bedpe.RDS
+
+#==============================================================================#
+#                         Weighted Correlation.                                #
+#==============================================================================#
+# Parameters to compute weighted correlation between
+# Promoter peaks and Distal peaks signal
+# Gene Expression and Distal peaks signal
+# wcorr_test: choose if Spearman or Pearson weighted correlations
+# wcorr_window, window in pase pairs to compute weighted correlations
+wcorr_test: Spearman
+wcorr_threshold: 0.05
+wcorr_window: 50000
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

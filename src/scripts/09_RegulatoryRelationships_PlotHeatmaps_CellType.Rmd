@@ -1,0 +1,293 @@
+---
+title: "scCAT-seq chromatin accessibility and transcriptome integration, Plot Regulatory Relationships Interactions"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    mathjax: null
+params:
+  assayID:  "foo"
+  work_dir: ""
+  omicsID:  "rna_atac"
+  plot_window: 1000000
+  matrix_rna:  "path/to/matrix_rna"
+  matrix_atac: "path/to/matrix_atac"
+  regrel:      "path/to/regulatoryrelationships"
+  metadata:    "path/to/metadata"
+  granges:     "path/to/granges"
+  
+  
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+library(kableExtra)
+library(viridis)
+library(parallel)
+library(GenomicRanges)
+
+MC_CORES <- 48L
+```
+
+# `r params$assayID`
+
+## Data loading
+  
+Read normalized RNAseq and Regulatory Relationships matrices
+
+  
+```{r dataloading, results="asis", cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Read normalized Expression matrices                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+rna.exprs   <- readRDS(params$matrix_rna)
+atac.exprs  <- readRDS(params$matrix_atac)
+
+# Use same ID
+colnames(atac.exprs)  <- colnames(rna.exprs)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Load Active Accessible peaks                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+cells.reg.mat <- readRDS(params$regrel)
+
+print("Dim of Regulatory Relationships matrix ")
+dim(cells.reg.mat)
+
+
+
+```
+
+
+```{r regulatoryDF}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                        Split in cell types                                 ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+rna.metadata <- readRDS(params$metadata)
+
+cells.clusters <- setNames(factor(rna.metadata$celltype), rna.metadata$sample.rna)
+table(cells.clusters)
+
+
+
+# Summarize by gene, count the number of cells that share a regulatory peak for each gene
+genes.ids <- factor(sapply(strsplit(rownames(cells.reg.mat), "\\|"), "[[", 1))
+
+# genes.reg <- mclapply(setNames(levels(genes.ids), levels(genes.ids)), function(gene){
+#   # Subset matrix to include only regulatory relationships of the selected gene
+#   cells.reg.mat.gene <- cells.reg.mat[genes.ids %in% gene, , drop=FALSE]
+#   rownames(cells.reg.mat.gene) <- sapply(strsplit(rownames(cells.reg.mat.gene), "\\|"), "[[", 2)
+#   # Summarize by Cell type
+#   do.call(cbind, lapply(setNames(levels(cells.clusters), levels(cells.clusters)), function(cluster.id){
+#     cellsInCluster <- cells.clusters %in% cluster.id
+#     #rowSums(cells.reg.mat.gene[,cellsInCluster])/sum(cellsInCluster)
+#     p2g <- round(rowSums(cells.reg.mat.gene[,cellsInCluster, drop=FALSE])/sum(cellsInCluster), digits = 2)
+#   }))
+# }, mc.cores=MC_CORES)
+# 
+# head(genes.reg)
+
+
+
+```
+
+
+
+```{r granges}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Read ATACseq Peaks as GRanges                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.peaks.granges <- readRDS(params$granges)
+atac.peaks.granges <- atac.peaks.granges[rownames(atac.exprs)]
+
+length(atac.peaks.granges)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Granges of human genes                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+library(EnsDb.Hsapiens.v75)
+edb <- EnsDb.Hsapiens.v75
+organism(edb)
+# supportedFilters(edb)
+## Change the seqlevels style form Ensembl (default) to UCSC:
+seqlevelsStyle(edb) <- "UCSC"
+
+hsapiens.genes <- genes(edb)
+hsapiens.genes <- hsapiens.genes[na.omit(match(sapply(strsplit(rownames(rna.exprs), "\\."), "[[", 1), mcols(hsapiens.genes)$gene_id))]
+
+```
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+library(viridis)
+
+genes.ids <- factor(sapply(strsplit(rownames(cells.reg.mat), "\\|"), "[[", 1))
+
+# Create directory to save plots
+plotdir <- paste0(params$work_dir, "/", params$assayID, "/figs/regulatoryRelationships_", (params$plot_window/1000), "Kb/RegulatoryHeatmaps/")
+dir.create(plotdir, recursive = TRUE)
+
+
+mclapply(setNames(levels(genes.ids), levels(genes.ids)), function(geneID){  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                        Granges to plot                                   ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  # Get list of peak regulating gene
+  #peaksIDs <- rownames(genes.reg[[geneID]])
+  # Granges of eaks and gene
+  gene.granges <- hsapiens.genes[geneID]
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                  Subset regulatory relationships matrix                  ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  # Subset matrix to include only regulatory relationships of the selected gene
+  cells.reg.mat.gene <- cells.reg.mat[genes.ids %in% geneID, , drop=FALSE] + 0
+  rownames(cells.reg.mat.gene) <- sapply(strsplit(rownames(cells.reg.mat.gene), "\\|"), "[[", 2)
+  cells.reg.mat.gene <- t(cells.reg.mat.gene)
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                     Sort matrix by genomic location                      ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  peakIDs <- colnames(cells.reg.mat.gene)
+  peak.granges <- atac.peaks.granges[peakIDs]
+  peakIDS <- names(sort(peak.granges))
+  
+  cells.reg.mat.gene <- cells.reg.mat.gene[, peakIDs, drop=FALSE]
+  #cells.clustersmatch(rownames(cells.reg.mat.gene), names(cells.clusters))
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                                Cluster Cells                             ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  cl <- hclust(dist(cells.reg.mat.gene, method = "binary"))
+  cellIDs.ordered <- cl$labels[cl$order]
+  # Sort cells according to binary distance clusters
+  cells.reg.mat.gene <- cells.reg.mat.gene[cellIDs.ordered, , drop=FALSE]
+  
+  cells.clusters.ordered <- cells.clusters[cellIDs.ordered]
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                Heatmap of Regulatory Relationships                       ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  gene.tss <- resize(gene.granges, 1, fix="start")
+  updown <- ifelse((start(peak.granges) - start(gene.tss)) < 0, "Downstream", "Upstream")
+  
+  
+  peak.heat.loc <- lapply(setNames(unique(updown), unique(updown)), function(location){
+    # Subset peaks according to location
+    reg.mat.loc <- cells.reg.mat.gene[,updown == location, drop=FALSE]
+    
+    
+    peak.heat <- Heatmap(reg.mat.loc, 
+                         col = viridis(2, begin = .0, end = .9),
+                         column_title = location,
+                         column_title_gp = gpar(fontsize=7),
+                         row_title_gp    = gpar(fontsize=6),
+                         width = unit(5*ncol(reg.mat.loc), "mm"),
+                         show_heatmap_legend = FALSE,
+                         heatmap_legend_param = list(title="Regulatory\nrelationship",
+                                                     legend_height = unit(1, "cm"),
+                                                     labels = c("False", "True"),
+                                                     labels_gp= gpar(fontsize=7),
+                                                     title_gp= gpar(fontsize=7)), 
+                         split = cells.clusters.ordered,
+                         gap = unit(1.5, "mm"),
+                         show_row_names    = FALSE,
+                         show_column_names = FALSE,
+                         cluster_columns = FALSE,
+                         cluster_rows    = FALSE)
+    return(peak.heat)
+  })
+  
+  #return(peak.heat.loc$Downstream + peak.heat.loc$Upstream)
+  
+  
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                      Gene expression Heatmap                             ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  gene.exprs.mat <- t(rna.exprs[geneID, cellIDs.ordered, drop=FALSE])
+  
+  # build color scheme
+  z <- sort(as.numeric(kmeans(gene.exprs.mat, centers = length(unique(cells.clusters.ordered)))$centers))
+  cut.points <- sapply(1:(length(z)-1), function(i){mean(z[i:i+1])})
+  cut.points <- c(min(gene.exprs.mat), cut.points, max(gene.exprs.mat))
+  
+  seq.vector <- do.call(c, lapply(1:(length(cut.points)-1), function(i){
+    seq(cut.points[i], cut.points[i+1], length.out = 20)
+  }))
+  
+  
+  darkpercent <- 0.6
+  darkpercent <- ceiling(length(seq.vector)*darkpercent)
+  colscheme <- c(viridis(n=darkpercent, begin=0, end=0.5),
+                 viridis(n=length(seq.vector)-darkpercent, begin=0.5, end=1))
+  colscheme <- colorRamp2(seq.vector, colscheme)
+  
+  gene.heat <- Heatmap(gene.exprs.mat,
+                       col = colscheme,
+                       width = unit(12, "mm"),
+                       row_title_gp    = gpar(fontsize=6),
+                       heatmap_legend_param = list(title=paste0(mcols(gene.granges)$symbol, "\nexpression"),
+                                                   title_gp= gpar(fontsize=7, fontface="bold"),
+                                                   labels_gp= gpar(fontsize=7),
+                                                   color_bar = "continuous",
+                                                   legend_height=unit(.5, "cm"),
+                                                   at=c(1, 7, 14)),
+                       split = cells.clusters.ordered,
+                       show_row_names    = FALSE,
+                       show_column_names = FALSE,
+                       cluster_columns = FALSE,
+                       cluster_rows    = FALSE)
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                    Regulatory relationships histogram                    ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  reg.sum <- colSums(cells.reg.mat[,cellIDs.ordered])
+  reg.hist <- HeatmapAnnotation(`TotalReg` = anno_barplot(reg.sum, gp = gpar(fill = "black"), which = "row"),
+                                 which = "row", width = unit(7, "mm"),
+                                #annotation_name_rot = c(90),
+                                annotation_name_gp = gpar(fontsize=6),
+                                annotation_name_offset = unit(1, "mm"),
+                                show_annotation_name = TRUE)
+  
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  ##                              Save plot                                   ##
+  ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+  
+  lgd = Legend(title="Regulatory\nrelationship",
+               at = c("False", "True"), 
+               labels = c("False", "True"), 
+               labels_gp= gpar(fontsize=7),
+               title_gp= gpar(fontsize=7),
+               legend_gp = gpar(fill = viridis(2, begin = .0, end = .9)))
+  
+  plot.width <- (5*ncol(cells.reg.mat.gene) + 50)/25.4
+  
+  plotpath <- paste0(plotdir, mcols(gene.granges)$symbol, "_", geneID, ".pdf")
+  pdf(file=plotpath, width=plot.width, height=2.5)
+  draw(peak.heat.loc$Downstream + gene.heat + peak.heat.loc$Upstream + reg.hist, 
+       heatmap_legend_list=list(lgd), 
+       heatmap_legend_side="right", 
+       gap = unit(.7, "mm"),
+       padding = unit(c(12, 2, 2, 2), "mm"))
+  dev.off()
+  
+}, mc.cores=MC_CORES)
+
+
+
+
+
+
+```
+
+

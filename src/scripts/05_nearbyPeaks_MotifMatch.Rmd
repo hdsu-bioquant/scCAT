@@ -1,0 +1,412 @@
+---
+title: "scCAT-seq chromatin accessibility and transcriptome integration, Motif Match"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    mathjax: null
+params:
+  assayID:     "foo"
+  work_dir:    ""
+  omicsID:     "rna_atac"
+  window:      1000e3
+  matrix_rna:  "path/to/matrix"
+  matrix_atac: "path/to/matrix"
+  granges:     "path/to/granges"
+  scenic:      "path/to/scenicbin"
+  peak2gene:     "path/to/output"
+  matchedmotifs: "path/to/output"
+  matched_tfs:   "path/to/output"
+  active_peaks:  "path/to/output"
+  
+
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(parallel)
+library(viridis)
+library(EnsDb.Hsapiens.v75)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(MotifDb)
+
+
+
+MC_CORES <- 48
+
+```
+
+# `r params$assayID`
+
+## Data loading
+  
+Read Granges peaks object, gene expression and peak accessibility normalized matrices
+  
+```{r dataloading, results="asis", cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                   Read normalized SingleCellExperiment                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# normalized counts matrix
+rna.sce  <- readRDS(params$matrix_rna)
+atac.sce <- readRDS(params$matrix_atac)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Read ATACseq Peaks as GRanges                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.peaks.granges <- readRDS(params$granges)
+atac.peaks.granges <- atac.peaks.granges[rownames(atac.sce)]
+
+length(atac.peaks.granges)
+
+```
+
+## Find nearby genes
+
+Look 1Mb up and downstream from each gene a find the peaks in that window
+
+```{r findNearbyGenes, warning=FALSE, cache=FALSE, message=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                               Window Size                                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+up_down <- params$window
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Granges of human genes                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+edb <- EnsDb.Hsapiens.v75
+organism(edb)
+# supportedFilters(edb)
+## Change the seqlevels style form Ensembl (default) to UCSC:
+seqlevelsStyle(edb) <- "UCSC"
+
+hsapiens.genes <- genes(edb)
+hsapiens.genes <- hsapiens.genes[na.omit(match(sapply(strsplit(rownames(rna.sce), "\\."), "[[", 1), mcols(hsapiens.genes)$gene_id))]
+message(hsapiens.genes)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Find peaks nearby of all genes                          ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Extend region by the predetermined window size
+hsapiens.genes.flank <- trim(resize(hsapiens.genes, width = up_down*2 + width(hsapiens.genes), fix = "center"))
+# Overlap with peaks
+peak2gene <- as.data.frame(findOverlaps(hsapiens.genes.flank, atac.peaks.granges))
+dim(peak2gene)
+
+# Add gene and peak IDs
+peak2gene$geneID <- names(hsapiens.genes.flank)[peak2gene$queryHits]
+peak2gene$peakID <- names(atac.peaks.granges)[peak2gene$subjectHits]
+
+# Find distance from gene to peak pairs
+hsapiens.tss <- resize(hsapiens.genes, 1, fix="start")
+peak2gene$distance <- distance(hsapiens.genes[peak2gene$geneID],atac.peaks.granges[peak2gene$peakID])
+peak2gene$distanceToTSS <- distance(hsapiens.tss[peak2gene$geneID],atac.peaks.granges[peak2gene$peakID])
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                         Find promoters of all genes                        ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Extract promoters from Ensembl DB
+hsapiens.promoters <- promoters(edb, upstream = 3000, downstream = 3000, filter=GeneIdFilter(peak2gene$geneID))
+
+p2pro <- data.frame(peakID=peak2gene$peakID[match(mcols(hsapiens.promoters)$gene_id, peak2gene$geneID)],
+                    geneID=peak2gene$geneID[match(mcols(hsapiens.promoters)$gene_id, peak2gene$geneID)],
+                    promID=names(hsapiens.promoters))
+# Overlap of peaks with promoters
+tmp.prom.overlap <- findOverlaps(hsapiens.promoters[p2pro$promID],atac.peaks.granges[p2pro$peakID])
+tmp.prom.overlap <- tmp.prom.overlap[from(tmp.prom.overlap) == to(tmp.prom.overlap)]
+# Asign to peak-promoter df
+p2pro$Promoter <- FALSE; p2pro$Promoter[from(tmp.prom.overlap)] <- TRUE
+sum(p2pro$Promoter)
+# Summarize by gene ID
+p2pro <- p2pro %>%
+  group_by(geneID, peakID) %>%
+  summarise(Promoter=sum(Promoter)>0) %>%
+  ungroup() %>%
+  mutate(map=paste0(geneID, peakID))
+sum(p2pro$Promoter)
+# Asign to trainSet
+peak2gene$Promoter <- p2pro$Promoter[match(paste0(peak2gene$geneID,peak2gene$peakID), p2pro$map)]
+peak2gene$Promoter[is.na(peak2gene$Promoter)] <- FALSE
+sum(peak2gene$Promoter)
+
+rm(p2pro, tmp.prom.overlap, hsapiens.promoters)
+###############
+###############
+# Find promoters manually
+hsapiens.promoters <- promoters(hsapiens.genes, upstream = 3000, downstream = 3000)
+
+# Overlap peaks with promoters
+tmp.prom.overlap <- findOverlaps(hsapiens.promoters[peak2gene$geneID],atac.peaks.granges[peak2gene$peakID])
+tmp.prom.overlap <- tmp.prom.overlap[from(tmp.prom.overlap) == to(tmp.prom.overlap)]
+
+# Asign to trainSet
+peak2gene$Promoter[from(tmp.prom.overlap)] <- TRUE
+sum(peak2gene$Promoter)
+
+rm(hsapiens.genes.flank, hsapiens.promoters, tmp.prom.overlap)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                              Find if exon                                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Extract exons from Ensembl DB
+hsapiens.exons <- exons(edb, filter=GeneIdFilter(peak2gene$geneID))
+
+p2exon <- data.frame(peakID = peak2gene$peakID[match(mcols(hsapiens.exons)$gene_id, peak2gene$geneID)],
+                     geneID = peak2gene$geneID[match(mcols(hsapiens.exons)$gene_id, peak2gene$geneID)],
+                     exonID = names(hsapiens.exons),
+                     stringsAsFactors = FALSE)
+dim(p2exon)
+# Overlap peaks with promoters
+tmp.exon.overlap <- findOverlaps(hsapiens.exons[p2exon$exonID],atac.peaks.granges[p2exon$peakID])
+tmp.exon.overlap <- tmp.exon.overlap[from(tmp.exon.overlap) == to(tmp.exon.overlap)]
+# Assing overlap annotaion to each exon and peal pair
+p2exon$Exon <- FALSE; p2exon$Exon[from(tmp.exon.overlap)] <- TRUE
+
+# Summarize by gene
+sum(p2exon$Exon)
+p2exon <- p2exon %>%
+  group_by(geneID, peakID) %>%
+  summarise(Exon=sum(Exon)>0) %>%
+  ungroup() %>%
+  mutate(map=paste0(geneID, peakID))
+sum(p2exon$Exon)
+# Asign to trainSet
+peak2gene$Exon <- p2exon$Exon[match(paste0(peak2gene$geneID,peak2gene$peakID), p2exon$map)]
+peak2gene$Exon[is.na(peak2gene$Exon)] <- FALSE
+sum(peak2gene$Exon)
+
+rm(hsapiens.exons, tmp.exon.overlap, p2exon)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Find if peak in five prime UTR                        ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Extract promoters from Ensembl DB
+hsapiens.UTR <- unlist(fiveUTRsByTranscript(edb, filter=GeneIdFilter(peak2gene$geneID)))
+
+p2utr <- data.frame(peakID = peak2gene$peakID[match(mcols(hsapiens.UTR)$gene_id, peak2gene$geneID)],
+                    geneID = peak2gene$geneID[match(mcols(hsapiens.UTR)$gene_id, peak2gene$geneID)],
+                    utrID  = names(hsapiens.UTR),
+                    stringsAsFactors = FALSE)
+dim(p2utr)
+# Overlap peaks with promoters
+tmp.utr.overlap <- findOverlaps(hsapiens.UTR[p2utr$utrID],atac.peaks.granges[p2utr$peakID])
+tmp.utr.overlap <- tmp.utr.overlap[from(tmp.utr.overlap) == to(tmp.utr.overlap)]
+# Assing overlap annotaion to each exon and peal pair
+p2utr$UTR <- FALSE; p2utr$UTR[from(tmp.utr.overlap)] <- TRUE
+# Summarize by gene
+sum(p2utr$UTR)
+p2utr <- p2utr %>%
+  group_by(geneID, peakID) %>%
+  summarise(UTR=sum(UTR)>0) %>%
+  ungroup() %>%
+  mutate(map=paste0(geneID, peakID))
+sum(p2utr$UTR)
+# Asign to trainSet
+peak2gene$fiveUTR <- p2utr$UTR[match(paste0(peak2gene$geneID,peak2gene$peakID), p2utr$map)]
+peak2gene$fiveUTR[is.na(peak2gene$fiveUTR)] <- FALSE
+sum(peak2gene$fiveUTR)
+
+rm(hsapiens.UTR, p2utr, tmp.utr.overlap)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Find if peak in five prime UTR                        ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Extract promoters from Ensembl DB
+hsapiens.UTR <- unlist(threeUTRsByTranscript(edb, filter=GeneIdFilter(peak2gene$geneID)))
+
+p2utr <- data.frame(peakID = peak2gene$peakID[match(mcols(hsapiens.UTR)$gene_id, peak2gene$geneID)],
+                    geneID = peak2gene$geneID[match(mcols(hsapiens.UTR)$gene_id, peak2gene$geneID)],
+                    utrID  = names(hsapiens.UTR),
+                    stringsAsFactors = FALSE)
+dim(p2utr)
+# Overlap peaks with promoters
+tmp.utr.overlap <- findOverlaps(hsapiens.UTR[p2utr$utrID],atac.peaks.granges[p2utr$peakID])
+tmp.utr.overlap <- tmp.utr.overlap[from(tmp.utr.overlap) == to(tmp.utr.overlap)]
+# Assing overlap annotaion to each exon and peal pair
+p2utr$UTR <- FALSE; p2utr$UTR[from(tmp.utr.overlap)] <- TRUE
+# Summarize by gene
+sum(p2utr$UTR)
+p2utr <- p2utr %>%
+  group_by(geneID, peakID) %>%
+  summarise(UTR=sum(UTR)>0) %>%
+  ungroup() %>%
+  mutate(map=paste0(geneID, peakID))
+sum(p2utr$UTR)
+# Asign to trainSet
+peak2gene$threeUTR <- p2utr$UTR[match(paste0(peak2gene$geneID,peak2gene$peakID), p2utr$map)]
+peak2gene$threeUTR[is.na(peak2gene$threeUTR)] <- FALSE
+sum(peak2gene$threeUTR)
+
+rm(hsapiens.UTR, p2utr, tmp.utr.overlap)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                         Find if peak is inside a gene                      ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+hsapiens.all.genes <- genes(edb)
+# Overlap peaks with genes
+tmp.gene.overlap <- findOverlaps(hsapiens.all.genes,atac.peaks.granges[peak2gene$peakID])
+# Asign to trainSet
+peak2gene$genic <- FALSE; peak2gene$genic[to(tmp.gene.overlap)] <- TRUE
+sum(peak2gene$genic)
+
+rm(hsapiens.all.genes, tmp.gene.overlap)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                         Find if peak is inside a gene                      ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+saveRDS(peak2gene, file = params$peak2gene)
+
+```
+
+
+# Find Transcription factor binding sites
+Using JASPAR database PWMs
+
+```{r scorePWM, cache=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                            read SCENIC results                             ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+#rna.scenic <- read.csv("results_human_embryo/rna/scenic/AUC.csv", sep="\t", row.names = 1)
+rna.scenic <- read.csv(params$scenic, sep="\t", row.names = 1)
+rownames(rna.scenic)
+colnames(rna.scenic)
+
+rna.scenic <- rna.scenic[rownames(rna.scenic) %in% colnames(rna.sce),]
+
+#tf.names <- strsplit(readLines("results_human_embryo/rna/scenic/AUC.csv", n=1), "\t")[[1]][-1]
+tf.names <- strsplit(readLines(params$scenic, n=1), "\t")[[1]][-1]
+colnames(rna.scenic) <- tf.names
+tf.names <- gsub("\\(.\\)", "", tf.names)
+
+dim(rna.scenic)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      DNAStringSet from ATACseq peaks                       ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Load genome sequence
+library(BSgenome.Hsapiens.UCSC.hg19)
+hsapiens.genome <- BSgenome.Hsapiens.UCSC.hg19
+class(hsapiens.genome)
+# create a BSgenome Views object from the ATACseq peaks
+atac.peaks.sequence <- BSgenomeViews(hsapiens.genome, atac.peaks.granges)
+# Coerce to a DNAStringSet object
+atac.peaks.sequence <- as(atac.peaks.sequence, "DNAStringSet")
+class(atac.peaks.sequence)
+(atac.peaks.sequence[[1]])
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                Load motifs PWMs                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+library(MotifDb)
+table(values(MotifDb)$dataSource)
+#Find TF motifs
+hsapiens.motifs <- as.list(query(MotifDb, "hsapiens")) #259
+# Number of TF with at least one motif
+sum(sapply(tf.names, function(tf) sum(grepl(tf, names(hsapiens.motifs), ignore.case = TRUE))) > 0)
+
+# Find list of motifs for all TFs
+m2tf <- lapply(setNames(tf.names, tf.names), function(tf) grep(tf, names(hsapiens.motifs), ignore.case = TRUE, value = TRUE))
+# each TF to data frame
+m2tf <- lapply(setNames(names(m2tf), names(m2tf)), function(tf) {
+  if (length(m2tf[[tf]]>0)) {
+    data.frame(motifID = m2tf[[tf]],
+               tfID    = tf)
+  }
+})
+m2tf <- do.call(rbind, m2tf)
+
+# TFs with missing motifs
+tf.names[which(!tf.names %in% m2tf$tfID)]
+# Drop motifs without TF
+hsapiens.motifs <- hsapiens.motifs[(names(hsapiens.motifs) %in% m2tf$motifID)]
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Match motifs to all ATACseq peaks                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Match motifs to peak regions
+motif.match <- do.call(rbind, mclapply(atac.peaks.sequence, function(peak){
+  sapply(hsapiens.motifs, function(motif){
+    countPWM(motif, peak, min.score="95%") + countPWM(reverseComplement(motif), peak, min.score="95%")
+  })
+}, mc.cores=MC_CORES))
+
+saveRDS(motif.match, file = params$matchedmotifs)
+class(motif.match)
+# summarize matches by TF
+
+tf.match <- do.call(cbind, lapply(setNames(tf.names, tf.names), function(tf){
+  motifs <- as.character(m2tf$motifID[which(m2tf$tfID %in% tf)])
+  rowSums(motif.match[ ,motifs,drop=FALSE])
+}))
+
+sum(rowSums(tf.match) == 0)
+sum(rowSums(tf.match > 0))/(ncol(tf.match)*nrow(tf.match))
+
+
+saveRDS(tf.match, file = params$matched_tfs)
+
+```
+
+# Find active peaks in each cell
+
+```{r scenic_motifmatch, cache=FALSE, echo=TRUE}
+
+rna.scenic[1:5,1:5]
+tf.match[1:5,1:5]
+dim(tf.match)
+dim(rna.scenic)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                Find active peaks                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+# Arrange matrices to merge 
+rna.scenic <- t(rna.scenic)
+summary(colSums(rna.scenic))
+sum(colSums(rna.scenic))
+
+colnames(tf.match) <- rownames(rna.scenic)
+
+# Find TF active in each peak
+active_peaks <- do.call(rbind, mclapply(setNames(rownames(tf.match), rownames(tf.match)), function(peak){
+  # Find activity of TF with binding motifs in each peak
+  tfs <- colnames(tf.match)[tf.match[peak,]>0]
+  sub.scenic <- rna.scenic[tfs,,drop=FALSE]
+  # String with TF IDs active in one peak
+  apply(sub.scenic, 2, function(scenic.score){
+    # Threschold to SCENIC AUC
+    is.tf <- scenic.score == 1
+    if (sum(na.omit(is.tf))>0) { paste(rownames(sub.scenic)[which(is.tf)], collapse = "|")
+    } else { NA }
+  })
+}, mc.cores=MC_CORES))
+
+active_peaks[1:10,1:10]
+saveRDS(active_peaks, file = params$active_peaks)
+
+apply(active_peaks[1:5,], 1, function(x) sum(!is.na(x)))
+
+sum(apply(active_peaks, 1, function(x) sum(!is.na(x))) > 0)
+sum(apply(active_peaks, 1, function(x) sum(!is.na(x))) == 0)
+sum(is.na(active_peaks))
+
+
+
+
+
+
+
+```
+

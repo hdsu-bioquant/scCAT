@@ -1,0 +1,186 @@
+---
+title: "scCAT-seq preprocessing Chromatin Accessibility (ATACseq)"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: false
+params:
+  assayID:  "foo"
+  counts:   "path/to/counts"
+  metadata: "path/to/metadata"
+  granges: "path/to/granges"
+  normcounts: "path/to/output/normcounts"
+  countsSCE:  "path/to/output/countsSCE"
+  work_dir: ""
+
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = FALSE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir="/icgc/dkfzlsdf/analysis/B080/quintera/Projects/scCATseq_ATAC_RNA")
+options(knitr.table.format="html")
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(viridis)
+library(circlize)
+library(scater)
+library(scran)
+
+```
+
+# `r params$assayID`
+
+  
+## Counts loading
+  
+```{r atac_dataloading, , results="asis", cache=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Read ATACseq count data                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+#read ATACseq counts and create a SCESet
+atac.counts <- readRDS(params$counts)
+
+atac.metadata <- readRDS(params$metadata)
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                      Read ATACseq Peaks as GRanges                         ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.features <- readRDS(params$granges)
+
+
+sum(!colnames(atac.counts) %in% atac.metadata$sample.atac)
+
+
+# Check cell types
+table(atac.metadata$celltype)
+atac.metadata$Type <- atac.metadata$celltype
+
+
+#Use ATAC counts to create SCESet
+library(SingleCellExperiment)
+class(atac.counts)
+atac.sce <- SingleCellExperiment(list(counts=as.matrix(atac.counts)))
+
+#calculate quality control metrics
+atac.sce <- calculateQCMetrics(atac.sce)
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Print dataset dimension                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+tmp.dim <- data.frame(dim(atac.sce))
+colnames(tmp.dim) <- "Value"
+
+cat("Dimension of chromatin accessibility dataset (ATACseq)  \n  ") 
+kable(tmp.dim) %>%
+  kable_styling(bootstrap_options=c("striped", "condensed"), full_width=FALSE)
+
+#number of samples by type
+
+tmp.dim <- data.frame(table(atac.metadata$celltype[match(colnames(atac.counts), atac.metadata$sample.atac)]))
+colnames(tmp.dim) <- c("Type", "CellNumber")
+
+cat("Chromatin accessibility dataset (ATACseq) Samples  \n  ") 
+kable(tmp.dim) %>%
+  kable_styling(bootstrap_options=c("striped", "condensed"), full_width=FALSE)
+
+
+```
+  
+## Quality Control on the cells
+  
+Library sizes and number of peaks for all cells:
+  
+```{r atac_qcCells_libsize}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Library sizes and number of peaks plot                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+par(mfrow=c(1,2))
+hist(atac.sce$total_counts/1e6, xlab="Library sizes (millions)", main="",
+     breaks=20, col="grey80", ylab="Number of cells")
+hist(atac.sce$total_features, xlab="Number of peaks", main="",
+     breaks=20, col="grey80", ylab="Number of cells")
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                  Library sizes and number of peaks filter                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.metadata$libsize.drop <- isOutlier(atac.sce$total_counts, nmads=3, type="lower", log=TRUE)
+atac.metadata$feature.drop <- isOutlier(atac.sce$total_features, nmads=3, type="lower", log=TRUE)
+
+```
+
+
+## Low-abundance Peaks filtering
+
+```{r atac_lowpeaks, echo=TRUE}
+ave.counts <- rowMeans(counts(atac.sce))
+
+
+#log-means across all peaks
+hist(log10(ave.counts), breaks=100, main="", col="grey80",
+     xlab=expression(Log[10]~"average count"))
+abline(v=log10(1), col="blue", lwd=2, lty=2)
+
+#Most highly represented peaks
+plotQC(atac.sce, type = "highest-expression", n=50) 
+
+
+#Keep peaks that have non-zero counts in at least 10% of the cells
+numcells <- nexprs(atac.sce, byrow=TRUE)
+#alt.keep <- numcells >= 10
+alt.keep <- numcells >= ncol(atac.sce)/10
+sum(alt.keep)
+
+
+
+smoothScatter(log10(ave.counts), numcells, xlab=expression(Log[10]~"average count"),
+     ylab="Number of expressing cells")
+
+#applying gene abundance filter
+atac.sce <- atac.sce[alt.keep,]
+dim(atac.sce)
+```
+
+## Normalization of cell-specific biases
+  
+Applying same method used for RNAseq, need revision!
+  
+```{r atac_normalization, echo=TRUE, cache=FALSE}
+table(atac.metadata$Type)
+
+# Compute size factors
+atac.sce <- computeSumFactors(atac.sce, sizes=c(3, 4, 5), clusters=atac.metadata$Type, positive=TRUE)
+summary(sizeFactors(atac.sce))
+plot(sizeFactors(atac.sce), atac.sce$total_counts/1e6, log="xy",
+     ylab="Library size (millions)", xlab="Size factor")
+
+atac.sce <- computeSumFactors(atac.sce, sizes=c(10, 20, 30, 40), positive=TRUE)
+summary(sizeFactors(atac.sce))
+plot(sizeFactors(atac.sce), atac.sce$total_counts/1e6, log="xy",
+     ylab="Library size (millions)", xlab="Size factor")
+
+# normalize peak accessibility
+atac.norm.sce <- normalize(atac.sce, log_exprs_offset=1)
+min(exprs(atac.norm.sce))
+hist(exprs(atac.norm.sce))
+
+# number of peaks without reads
+sum(counts(atac.norm.sce) == 0)
+sum(exprs(atac.norm.sce) <= 0)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                           Save normalized reads                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+saveRDS(atac.norm.sce, file = params$countsSCE)
+saveRDS(exprs(atac.norm.sce), file = params$normcounts)
+
+```

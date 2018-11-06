@@ -1,0 +1,278 @@
+---
+title: "scCAT-seq preprocessing Transcriptome (RNAseq)"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: false
+params:
+  assayID:  "foo"
+  counts:   "path/to/counts"
+  metadata: "path/to/metadata"
+  cyclone:    "path/to/output/cyclone"
+  normcounts: "path/to/output/normcounts"
+  countsSCE:  "path/to/output/countsSCE"
+  scenicmat:  "path/to/output/scenicmat"
+  work_dir: ""
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(viridis)
+library(circlize)
+library(Homo.sapiens)
+library(scater)
+library(scran)
+
+
+```
+
+
+# `r params$assayID`
+
+## Counts loading
+  
+Read raw RNAseq data and annotate genes to genome location
+  
+```{r rna_dataloading, results="asis", cache=FALSE, message=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Read RNAseq count data                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+#read RNAseq counts and create a SCESet
+rna.counts <- readRDS(params$counts)
+rna.features <- data.frame(ID = rownames(rna.counts),
+                           ENSEMBL = rownames(rna.counts),
+                           stringsAsFactors = FALSE)
+# read metadata
+rna.metadata <- readRDS(params$metadata)
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          annotate genes                                    ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+#Map Ensembl IDs to ENTREZ IDs
+tmp.anno <- AnnotationDbi::select(Homo.sapiens, rna.features$ENSEMBL, "ENTREZID", "ENSEMBL")
+rna.features$ENTREZID <- tmp.anno[match(rna.features$ENSEMBL, tmp.anno$ENSEMBL),]$ENTREZID
+#Map Ensembl IDs to gene SYMBOL
+tmp.anno <- AnnotationDbi::select(Homo.sapiens, rna.features$ENSEMBL, "SYMBOL", "ENSEMBL")
+rna.features$SYMBOL <- tmp.anno[match(rna.features$ENSEMBL, tmp.anno$ENSEMBL),]$SYMBOL
+
+#Identify mitochondrial Genes
+tmp.anno <- AnnotationDbi::select(TxDb.Hsapiens.UCSC.hg19.knownGene, keys=rna.features$ENTREZID,
+                                  column="CDSCHROM", keytype="GENEID")
+rna.features$location <- tmp.anno[match(rna.features$ENTREZID, tmp.anno$GENEID),]$CDSCHROM
+rna.features$is.mito <- rna.features$location == "chrM" & !is.na(rna.features$location)
+
+
+#Keep only Celllines samples
+table(rna.metadata$celltype)
+rna.metadata$Type <- rna.metadata$celltype
+
+
+#Use RNAseq counts to create SCESet
+library(SingleCellExperiment)
+class(rna.counts)
+rna.sce <- SingleCellExperiment(list(counts=as.matrix(rna.counts)))
+
+#calculate quality control metrics
+rna.sce <- calculateQCMetrics(rna.sce, feature_controls=list(Mt=rna.features$is.mito))
+
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Print dataset dimension                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+tmp.dim <- data.frame(dim(rna.sce))
+colnames(tmp.dim) <- "Value"
+tmp.dim <- rbind(tmp.dim, Mitochondrial_genes=sum(rna.features$is.mito))
+
+cat("Dimension of transcriptome dataset (RNAseq)  \n  ") 
+kable(tmp.dim) %>%
+  kable_styling(bootstrap_options=c("striped", "condensed"), full_width=FALSE)
+
+
+#number of samples by type
+
+tmp.dim <- data.frame(table(rna.metadata$celltype[match(colnames(rna.counts), rna.metadata$sample.rna)]))
+colnames(tmp.dim) <- c("Type", "CellNumber")
+
+cat("Transcriptome dataset (RNAseq) Samples  \n  ") 
+kable(tmp.dim) %>%
+  kable_styling(bootstrap_options=c("striped", "condensed"), full_width=FALSE)
+
+```
+  
+## Quality Control on the cells
+  
+Library sizes and number of expressed genes for all cells:
+  
+```{r rna_qcCells_libsize}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Library sizes and expressed genes plot                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+par(mfrow=c(1,2))
+hist(rna.sce$total_counts/1e6, xlab="Library sizes (millions)", main="",
+     breaks=20, col="grey80", ylab="Number of cells")
+hist(rna.sce$total_features, xlab="Number of expressed genes", main="",
+     breaks=20, col="grey80", ylab="Number of cells")
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                  Library sizes and expressed genes filter                  ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+rna.metadata$libsize.drop <- isOutlier(rna.sce$total_counts, nmads=3, type="lower", log=TRUE)
+rna.metadata$feature.drop <- isOutlier(rna.sce$total_features, nmads=3, type="lower", log=TRUE)
+
+```
+
+
+Proportion of genes annotated to mitochondrial genes:
+
+```{r rna_qcCells_mitoMap}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##        Proportion of reads mapped to mitochondrial genome plot             ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+par(mfrow=c(1,1))
+hist(rna.sce$pct_counts_Mt, xlab="Mitochondrial proportion (%)",
+     ylab="Number of cells", breaks=20, main="", col="grey80")
+
+rna.metadata$mito.drop <- isOutlier(rna.sce$pct_counts_Mt, nmads=3, type="higher")
+```
+  
+
+## Classification of cell cycle phase  
+  
+```{r rna_cellcyle, cache=FALSE}
+hs.pairs <- readRDS(system.file("exdata", "human_cycle_markers.rds", package="scran"))
+
+rna.assignments <- cyclone(rna.sce, hs.pairs, gene.names=rownames(rna.sce))
+plot(rna.assignments$score$G1, rna.assignments$score$G2M, xlab="G1 score", ylab="G2/M score", pch=16)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                     Save cell cycle assignments                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+saveRDS(rna.assignments, file = params$cyclone)
+```
+
+  
+## Low-abundance genes filtering
+
+```{r rna_lowgenes, echo=TRUE, cache=FALSE}
+ave.counts <- rowMeans(counts(rna.sce))
+
+#log-means across all genes
+hist(log10(ave.counts), breaks=100, main="", col="grey80",
+     xlab=expression(Log[10]~"average count"))
+abline(v=log10(1), col="blue", lwd=2, lty=2)
+
+#Most highly expressed genes
+plotQC(rna.sce, type = "highest-expression", n=50) 
+
+
+#Keep genes that have non-zero counts in at least 10% of the cells
+numcells <- nexprs(rna.sce, byrow=TRUE)
+#alt.keep <- numcells >= 10
+alt.keep <- numcells >= ncol(rna.sce)/10
+sum(alt.keep)
+
+
+
+smoothScatter(log10(ave.counts), numcells, xlab=expression(Log[10]~"average count"),
+     ylab="Number of expressing cells")
+
+#applying gene abundance filter
+rna.sce <- rna.sce[alt.keep,]
+dim(rna.sce)
+```
+
+
+## Normalization of cell-specific biases
+  
+"Using the deconvolution method to deal with zero counts. Read counts are subject to differences in capture efficiency and sequencing depth between cells (Stegle et al., 2015). Normalization is required to eliminate these cell-specific biases prior to downstream quantitative analyses. This is often done by assuming that most genes are not differentially expressed (DE) between cells. Any systematic difference in count size across the non-DE majority of genes between two cells is assumed to represent bias and is removed by scaling. More specifically, “size factors” are calculated that represent the extent to which counts should be scaled in each library.
+
+Size factors can be computed with several different approaches, e.g., using the estimateSizeFactorsFromMatrix function in the DESeq2 package (Anders & Huber, 2010; Love et al., 2014), or with the calcNormFactors function (Robinson & Oshlack, 2010) in the edgeR package. However, single-cell data can be problematic for these bulk data-based methods due to the dominance of low and zero counts. To overcome this, we pool counts from many cells to increase the count size for accurate size factor estimation (Lun et al., 2016). Pool-based size factors are then “deconvolved” into cell-based factors for cell-specific normalization." 
+taken from  Lun ATL, McCarthy DJ and Marioni JC. A step-by-step workflow for low-level analysis of single-cell RNA-seq data with Bioconductor [version 2; referees: 3 approved, 2 approved with reservations]. F1000Research 2016, 5:2122
+(doi: 10.12688/f1000research.9501.2) 
+  
+```{r rna_normalization, echo=TRUE, cache=FALSE}
+table(rna.metadata$Type)
+
+# Compute size factors
+rna.sce <- computeSumFactors(rna.sce, sizes=c(10, 20, 30, 40))
+summary(sizeFactors(rna.sce))
+plot(sizeFactors(rna.sce), rna.sce$total_counts/1e6, log="xy",
+     ylab="Library size (millions)", xlab="Size factor")
+
+# normalize gene expression
+rna.norm.sce <- normalize(rna.sce, log_exprs_offset=1)
+min(exprs(rna.norm.sce))
+hist(exprs(rna.norm.sce))
+
+# number of genes without expression
+sum(counts(rna.norm.sce) == 0)
+sum(exprs(rna.norm.sce) <= 0)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                           Save normalized reads                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+saveRDS(rna.norm.sce, file = params$countsSCE)
+saveRDS(exprs(rna.norm.sce), file = params$normcounts)
+```
+
+
+```{r saveToScenic, warning=FALSE}
+rna.exprs <- as.data.frame(exprs(rna.norm.sce))
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                          Granges of human genes                            ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+library(EnsDb.Hsapiens.v75)
+edb <- EnsDb.Hsapiens.v75
+organism(edb)
+# supportedFilters(edb)
+## Change the seqlevels style form Ensembl (default) to UCSC:
+seqlevelsStyle(edb) <- "UCSC"
+
+hsapiens.genes <- genes(edb)
+
+
+rna.exprs$geneID <- hsapiens.genes$symbol[match(rownames(rna.exprs), hsapiens.genes$gene_id)]
+
+library(tidyr)
+library(dplyr)
+
+rna.exprs <- rna.exprs %>%
+  group_by(geneID) %>%
+  summarise_all(mean) %>%
+  dplyr::filter(!is.na(geneID)) %>%
+  as.data.frame()
+
+
+warning(tail(rownames(rna.exprs)))
+warning(tail(rna.exprs$geneID))
+
+rownames(rna.exprs) <- rna.exprs$geneID
+rna.exprs <- rna.exprs[,-1]
+colnames(rna.exprs) 
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                   Save normalized gene expression                          ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+write.csv(rna.exprs, file = params$scenicmat, quote = FALSE)
+```
+
+
+
+

@@ -1,0 +1,131 @@
+---
+title: "scCAT-seq chromatin accessibility and transcriptome integration, Active Accessible Peaks"
+author: "Health Data Science Unit"
+date: "`r date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: false
+    mathjax: null
+params:
+  assayID:  "foo"
+  work_dir: ""
+  omicsID:  "rna_atac"
+  sce_atac:     "path/to/sce_atac"
+  peak2gene:    "path/to/peakannot"
+  active_peaks: "path/to/activepeaks"
+  activeaccess: "path/to/output"
+  
+  
+---
+
+```{r setup, include=FALSE}
+#this chunk sets global options for Rmarkdown
+knitr::opts_chunk$set(echo = TRUE)
+#setting working directory. Should be home directory of the project
+knitr::opts_knit$set(root.dir=params$work_dir)
+options(knitr.table.format="html")
+
+library(knitr)
+library(kableExtra)
+library(viridis)
+library(parallel)
+library(scran)
+
+
+
+MC_CORES <- 10L
+```
+
+# `r params$assayID`
+
+## Data loading
+  
+Read normalized RNA and ATACseq data, and find clusters using the normalized H matrix
+(after normalization, each cell is asignmed to one cluster, taking the max of the exposure to all NMF signatures)
+
+Read train sets
+  
+```{r dataloading, results="asis", cache=FALSE, message=FALSE, warning=FALSE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                  Expression and accessibility matrices                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+atac.sce    <- readRDS(params$sce_atac)
+atac.counts <- counts(atac.sce)
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                    Find peaks nearby X Kb of all genes                     ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+peak2gene <- readRDS(params$peak2gene)
+
+head(peak2gene)
+length(unique(peak2gene$geneID))
+length(unique(peak2gene$peakID))
+peak2gene <- peak2gene[,!colnames(peak2gene) %in% c("queryHits", "subjectHits")]
+dim(peak2gene)
+
+# Keep only gene and peak IDs
+peak2gene <- peak2gene[,c("geneID", "peakID")]
+
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                Find active peaks                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+active_peaks <- readRDS(params$active_peaks)
+active_peaks[1:5,1:4]
+
+sum(is.na(active_peaks))
+sum(!is.na(active_peaks))
+
+# change to RNAseq sampleID
+colnames(atac.counts) <- colnames(active_peaks)
+
+```
+
+
+```{r buildDataset, cache=FALSE, eval=TRUE}
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+##                                Find active peaks                           ##
+##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
+
+cellsToPredict.IDs <- setNames(colnames(active_peaks),colnames(active_peaks))
+
+cells.reg.mat <- do.call(cbind, mclapply(cellsToPredict.IDs, function(cell){
+  # Find if peak is accesible in the cell
+  isacces <- atac.counts[peak2gene$peakID, cell] > 0
+  
+  # Find active TF with binding sites in peak
+  peak2TF <- !is.na(active_peaks[peak2gene$peakID, cell])
+  
+  # Active Accessible peaks
+  id <- paste0(peak2gene$geneID, "|", peak2gene$peakID)
+  is.reg <- peak2TF & isacces
+  names(is.reg) <- id
+  return(is.reg)
+  
+}, mc.cores=MC_CORES))
+
+dim(cells.reg.mat)
+
+# Filter non regulatory pairs
+cells.reg.mat <- cells.reg.mat[!rowSums(cells.reg.mat)==0,]
+
+dim(cells.reg.mat)
+cells.reg.mat[1:5,1:5]
+
+saveRDS(cells.reg.mat, file = params$activeaccess)
+  
+# atac.counts[1:5,1:5]
+# head(peak2gene$peakID)
+# 
+# length(atac.counts)
+# sum(peak2gene$peakID %in% rownames(atac.counts))
+# sum(rownames(atac.counts) %in% peak2gene$peakID )
+# 
+# 
+#  atac.counts[peak2gene$peakID, 1]
+
+```
+
+
