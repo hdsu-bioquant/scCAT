@@ -23,7 +23,7 @@ params:
 #this chunk sets global options for Rmarkdown
 knitr::opts_chunk$set(echo = FALSE)
 #setting working directory. Should be home directory of the project
-knitr::opts_knit$set(root.dir="/icgc/dkfzlsdf/analysis/B080/quintera/Projects/scCATseq_ATAC_RNA")
+knitr::opts_knit$set(root.dir=params$work_dir)
 options(knitr.table.format="html")
 
 library(knitr)
@@ -106,14 +106,14 @@ Library sizes and number of peaks for all cells:
 par(mfrow=c(1,2))
 hist(atac.sce$total_counts/1e6, xlab="Library sizes (millions)", main="",
      breaks=20, col="grey80", ylab="Number of cells")
-hist(atac.sce$total_features, xlab="Number of peaks", main="",
+hist(atac.sce$total_features_by_counts, xlab="Number of peaks", main="",
      breaks=20, col="grey80", ylab="Number of cells")
 
 ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
 ##                  Library sizes and number of peaks filter                  ##
 ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
 atac.metadata$libsize.drop <- isOutlier(atac.sce$total_counts, nmads=3, type="lower", log=TRUE)
-atac.metadata$feature.drop <- isOutlier(atac.sce$total_features, nmads=3, type="lower", log=TRUE)
+atac.metadata$feature.drop <- isOutlier(atac.sce$total_features_by_counts, nmads=3, type="lower", log=TRUE)
 
 ```
 
