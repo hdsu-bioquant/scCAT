@@ -7,7 +7,7 @@ DIR_E = '.dexist'
 configfile: 'configs/configfile.yaml'
 
 
-localrules: all, install_missing_R_01, install_missing_R_02
+localrules: all, install_missing_R_01, install_missing_R_02, scenic_GRNBoost
 
 
 
@@ -449,16 +449,17 @@ rule motif_match:
 #================================================================================#
 rule scenic_AUCell:
     input: 
-        scenicmat  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
-        modules  = join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin'),
+        scenicmat   = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
+        modules     = join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin'),
+        regulonsbin = join(RESULTSPATH, '{assay}/rna/scenic/phases/03_regulons.bin'),
         motif_annotation = 'db/HumanMotifAnnotation/motifs-v9-nr.hgnc-m0.001-o0.0.tbl'
     output: 
         scenic_auc = join(RESULTSPATH, '{assay}/rna/scenic/{assay}_AUC.csv'),
         scenic_bin = join(RESULTSPATH, '{assay}/rna/scenic/{assay}_binary_AUC.csv')
     params:
-        script = 'scripts/scenic/03_PHASE3_AUCell.py',
-        dbdir  = 'db/',
-        outdir = join(RESULTSPATH, '{assay}/rna/scenic'),
+        script  = 'scripts/scenic/03_PHASE3_AUCell.py',
+        dbdir   = 'db/',
+        outdir  = join(RESULTSPATH, '{assay}/rna/scenic'),
         assayID = '{assay}'
     conda: 'envs/scenic.yaml'
     shell:
@@ -471,7 +472,7 @@ rule scenic_AUCell:
 
 rule scenic_RcisTarget:
     input: 
-        scenicmat  = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
+        scenicmat = join(RESULTSPATH, '{assay}/rna/scater/{assay}_RNAseq_scenicmat.csv'),
         modules   = join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin'),
         motif_annotation = 'db/HumanMotifAnnotation/motifs-v9-nr.hgnc-m0.001-o0.0.tbl'
     output: 
@@ -500,7 +501,7 @@ rule scenic_GRNBoost:
         adjacen   = join(RESULTSPATH, '{assay}/rna/scenic/phases/01_adjacencies.csv'),
         modules   = join(RESULTSPATH, '{assay}/rna/scenic/phases/02_modules.bin')
     params:
-        script = 'scripts/scenic/00_PHASE0_preprocessing.py',
+        script = 'scripts/scenic/01_PHASE1_GRNBoost.py',
         dbdir  = 'db/',
         outdir = join(RESULTSPATH, '{assay}/rna/scenic'),
         assayID = '{assay}'
