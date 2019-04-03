@@ -123,14 +123,14 @@ Library sizes and number of expressed genes for all cells:
 par(mfrow=c(1,2))
 hist(rna.sce$total_counts/1e6, xlab="Library sizes (millions)", main="",
      breaks=20, col="grey80", ylab="Number of cells")
-hist(rna.sce$total_features, xlab="Number of expressed genes", main="",
+hist(rna.sce$total_features_by_counts, xlab="Number of expressed genes", main="",
      breaks=20, col="grey80", ylab="Number of cells")
 
 ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
 ##                  Library sizes and expressed genes filter                  ##
 ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
 rna.metadata$libsize.drop <- isOutlier(rna.sce$total_counts, nmads=3, type="lower", log=TRUE)
-rna.metadata$feature.drop <- isOutlier(rna.sce$total_features, nmads=3, type="lower", log=TRUE)
+rna.metadata$feature.drop <- isOutlier(rna.sce$total_features_by_counts, nmads=3, type="lower", log=TRUE)
 
 ```
 
