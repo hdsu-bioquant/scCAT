@@ -113,7 +113,7 @@ outer.iter <- params$nmf_iter
 inner.iter <- 2*10^4
 
 # path to save NMF results
-path.NMF.run <- paste0(params$assayID, "/", params$omicsID, "/NMF/", params$assayID, "_NMF_", params$omicsID, ".RDS")
+path.NMF.run <- sub("_normNMF_", "_NMF_", params$norm_nmf)
 ```
 
 
@@ -131,18 +131,15 @@ if (file.exists(path.NMF.run)) {
   ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
   ##                                   Run NMF                                ##
   ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
-  nmf.exp <- runNmfGpuPyCuda(
-    nmf.exp = nmf.exp,
-    k.min = k.min,
-    k.max = k.max,
-    outer.iter = outer.iter,
-    inner.iter = inner.iter,
-    tmp.path = paste0(params$work_dir, "/tmp"),
-    seed = TRUE,
-    gpu.id = 0)
+  nmf.exp <- runNMFtensor(nmf.exp,
+                          k.min = k.min, 
+                          k.max = k.max, 
+                          outer.iter = outer.iter, 
+                          inner.iter = inner.iter, 
+                          conver.test.stop.threshold = 100)
   
   # save results
-  saveRDS(nmf.exp, file = params$nmf)
+  saveRDS(nmf.exp, file = path.NMF.run)
 }
 
 ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##

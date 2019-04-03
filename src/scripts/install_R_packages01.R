@@ -2,20 +2,10 @@
 ##                            Bratwurst requirements                          ##
 ##––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––##
 
-if(!require(kableExtra)){
-  install.packages('kableExtra', repos = 'http://cran.us.r-project.org')
-}
+#options(unzip = "internal")
+#Sys.setenv(TAR = "/bin/tar")
 
-if(!require(RcppCNPy)){
-  install.packages('RcppCNPy', repos = 'http://cran.us.r-project.org')
-}
-
-if(!require(riverplot)){
-  install.packages('riverplot', repos = 'http://cran.us.r-project.org')
-}
+devtools::install_github('andquintero/bratwurst', ref='dev_hdsu')
 
 
-library(devtools)
-options(unzip = "internal")
-devtools::install_github("wurst-theke/bratwurst")
-
+writeLines("complete installation", ".snakemake/completeLibrary.txt")

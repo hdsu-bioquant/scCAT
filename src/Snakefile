@@ -7,7 +7,7 @@ DIR_E = '.dexist'
 configfile: 'configs/configfile.yaml'
 
 
-localrules: all, install_missing_R01, install_missing_R02
+localrules: all, install_missing_R_01, install_missing_R_02
 
 
 
@@ -231,7 +231,7 @@ rule regulatory_relationships_NMF:
         nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
         nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
         nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -272,7 +272,7 @@ rule regulatory_relationships_heatmaps:
         assayID = '{assay}',
         plot_window = config['match_window'],
         workdir = RESULTSPATH
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -309,7 +309,7 @@ rule regulatory_relationships_arches:
         assayID = '{assay}',
         plot_window = config['plot_window'],
         workdir = RESULTSPATH
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -346,7 +346,7 @@ rule regulatory_relationships:
         diff_exprs_test = config['diff_exprs_test'],
         diff_exprs_threshold = config['diff_exprs_threshold'],
         workdir = RESULTSPATH
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -382,7 +382,7 @@ rule active_accesible_peaks:
         assayID = '{assay}',
         workdir = RESULTSPATH, 
         window  = config['match_window']
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -419,7 +419,7 @@ rule motif_match:
         assayID = '{assay}',
         workdir = RESULTSPATH, 
         window  = config['match_window']
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -564,7 +564,7 @@ rule NMF_joint:
         nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
         nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
         nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -604,7 +604,7 @@ rule NMF_atac:
         nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
         nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
         nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -645,7 +645,7 @@ rule NMF_rna:
         nmf_kmin = lambda wildcards: config["NMFparams"][wildcards.assay]["k.min"],
         nmf_kmax = lambda wildcards: config["NMFparams"][wildcards.assay]["k.max"],
         nmf_iter = lambda wildcards: config["NMFparams"][wildcards.assay]["iterations"]
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -684,7 +684,7 @@ rule preprocess_atac:
         script  = 'scripts/01_preprocessing_ATACseq.Rmd',
         assayID = '{assay}',
         workdir = DATAPATH
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -722,7 +722,7 @@ rule preprocess_rna:
         script  = 'scripts/00_preprocessing_RNAseq.Rmd',
         assayID = '{assay}',
         workdir = DATAPATH
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         cp {params.script} {output.rmd}
@@ -747,17 +747,17 @@ rule install_missing_R_01:
     output: ".snakemake/completeLibrary.txt"
     params:
         script  = 'scripts/install_R_packages01.R',
-    conda: 'envs/cuda_R3.4.yaml'
+    conda: 'envs/tensor_R3.5.yaml'
     shell:
         """
         
         Rscript {params.script}
     
-        git clone https://github.com/cudamat/cudamat.git
-        pip install cudamat/
-        rm -rf cudamat
+        #git clone https://github.com/cudamat/cudamat.git
+        #pip install cudamat/
+        #rm -rf cudamat
     
-        touch {output}
+        #touch {output}
         
         """
 

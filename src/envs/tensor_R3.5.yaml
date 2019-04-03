@@ -1,0 +1,26 @@
+name: tensorflow_R3.5
+channels:
+  - bioconda
+  - defaults
+  - conda-forge
+dependencies:
+  - r-base=3.5.1
+  - rstudio
+  - r-limsolve
+  - r-devtools 
+  - r-kableextra
+  - r-biocmanager
+  - bioconductor-biocinstaller
+  - bioconductor-scran
+  - bioconductor-scater
+  - bioconductor-ensdb.hsapiens.v75 
+  - bioconductor-bsgenome.hsapiens.ucsc.hg19 
+  - bioconductor-motifdb 
+  - bioconductor-ggbio 
+  - bioconductor-homo.sapiens
+  - python=3.6.7
+  - numpy
+  - pip
+  - pip:
+    - tensorflow==2.0.0-alpha0
+  
